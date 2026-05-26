@@ -1,6 +1,7 @@
 {
   "python.analysis.include": [
     "libs/**",
+    "examples/enterprise_alert_agent/**",
   ],
   "python.analysis.exclude": [
     "**/node_modules",
@@ -75,5 +76,6 @@
     {
       "file": ".github/workflows/pr_lint.yml"
     }
-  ]
+  ],
+  "python-envs.defaultEnvManager": "ms-python.python:system"
 }
