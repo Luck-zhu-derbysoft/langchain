@@ -59,6 +59,7 @@ else:
     embeddings_raw = embedding_results.get("embeddings")
     embeddings: list[Any] = list(embeddings_raw) if embeddings_raw is not None else []
 
+
 print("\n=== 向量信息 ===")
 for doc_id, embedding in zip(embedding_ids, embeddings):
     print(f"ID: {doc_id}\nEmbedding向量: {embedding[:5]}...（共{len(embedding)}维）\n---")
