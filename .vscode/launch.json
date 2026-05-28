@@ -1,0 +1,50 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+
+
+
+
+
+
+    {
+      "name": "Enterprise Alert Agent: Run (no debug)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/examples/enterprise_alert_agent/.venv/Scripts/python.exe",
+      "module": "uvicorn",
+      "args": [
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "cwd": "${workspaceFolder}/examples/enterprise_alert_agent",
+      "envFile": "${workspaceFolder}/examples/enterprise_alert_agent/.env",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "noDebug": true
+    },
+    {
+      "name": "Enterprise Alert Agent: Debug (breakpoints)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/examples/enterprise_alert_agent/.venv/Scripts/python.exe",
+      "module": "uvicorn",
+      "args": [
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "cwd": "${workspaceFolder}/examples/enterprise_alert_agent",
+      "envFile": "${workspaceFolder}/examples/enterprise_alert_agent/.env",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

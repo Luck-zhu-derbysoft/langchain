@@ -69,7 +69,7 @@ for doc_id, embedding in zip(embedding_ids, embeddings):
 # print(f"已删除 1 条数据。当前文档总数: {collection.count()}")
 
 # # 按照 where 条件删除数据（示例：删除 source_id 为 "alert-rule-001" 的文档）
-# collection.delete(where={"source_id": "alert-rule-001"})
+# collection.delete(where={"source_id": "0527001"})
 # print("deleted by where(source_id)")
 
 # # 删除 collection 中的所有数据（慎用！）

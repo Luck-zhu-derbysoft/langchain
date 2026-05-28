@@ -16,9 +16,9 @@ class IngestService:
         """处理纯文本摄入请求。
 
         流程：
-        1. 调用 TextSplitter 将文本切块
-        2. 为每个块附加元数据（source_id + 块序号）
-        3. 写入 ChromaDB 向量库
+        1. 文本切块
+        2. 为每个块附加元数据
+        3. 写入 ChromaDB
         """
         # 切块
         chunks = self._splitter.split(req.content)

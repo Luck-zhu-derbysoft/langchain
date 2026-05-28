@@ -1,0 +1,15 @@
+{
+  "folders": [
+    {
+      "name": "rag-langchain",
+      "path": "."
+    },
+    {
+      "name": "enterprise_alert_agent",
+      "path": "examples/enterprise_alert_agent"
+    }
+  ],
+  "settings": {
+    "python.terminal.activateEnvironment": false
+  }
+}

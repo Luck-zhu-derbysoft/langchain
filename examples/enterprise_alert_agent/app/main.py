@@ -1,5 +1,10 @@
+# 1. 先导入并执行 LangSmith 配置（必须在所有业务代码之前！）
 import logging
+import sys
 from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
@@ -9,12 +14,15 @@ from app.api.routers.chat import router as chat_router
 from app.api.routers.health import router as health_router
 from app.api.routers.ingest import router as ingest_router
 from app.config.settings import settings
+from app.config.tracing_config import configure_langsmith
 from app.infrastructure.llm.model_client import ModelAuthError, ModelClient, ModelRequestError
 
 logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
+    configure_langsmith()
+
     app = FastAPI(
         title=settings.app_name,
         version="0.2.0",
@@ -64,3 +72,9 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)

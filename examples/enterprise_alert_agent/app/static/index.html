@@ -1,33 +1,43 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>企业知识助手</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             background: #f5f7fa;
             color: #333;
             min-height: 100vh;
         }
+
         .container {
             max-width: 1000px;
             margin: 0 auto;
             padding: 20px;
         }
+
         h1 {
             text-align: center;
             padding: 20px 0;
             color: #1a73e8;
             font-size: 24px;
         }
+
         .tabs {
             display: flex;
             gap: 0;
             margin-bottom: 0;
         }
+
         .tab-btn {
             flex: 1;
             padding: 12px 24px;
@@ -39,24 +49,30 @@
             transition: all 0.2s;
             border-radius: 8px 8px 0 0;
         }
+
         .tab-btn.active {
             background: #fff;
             color: #1a73e8;
-            box-shadow: 0 -2px 4px rgba(0,0,0,0.05);
+            box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.05);
         }
+
         .tab-content {
             display: none;
             background: #fff;
             padding: 24px;
             border-radius: 0 0 8px 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
         }
-        .tab-content.active { display: block; }
+
+        .tab-content.active {
+            display: block;
+        }
 
         /* 表单样式 */
         .form-group {
             margin-bottom: 16px;
         }
+
         .form-group label {
             display: block;
             margin-bottom: 6px;
@@ -64,6 +80,7 @@
             font-size: 14px;
             color: #555;
         }
+
         .form-group input,
         .form-group textarea {
             width: 100%;
@@ -73,15 +90,18 @@
             font-size: 14px;
             transition: border-color 0.2s;
         }
+
         .form-group input:focus,
         .form-group textarea:focus {
             outline: none;
             border-color: #1a73e8;
         }
+
         .form-group textarea {
             min-height: 120px;
             resize: vertical;
         }
+
         .btn {
             padding: 10px 24px;
             border: none;
@@ -91,11 +111,16 @@
             cursor: pointer;
             transition: all 0.2s;
         }
+
         .btn-primary {
             background: #1a73e8;
             color: #fff;
         }
-        .btn-primary:hover { background: #1557b0; }
+
+        .btn-primary:hover {
+            background: #1557b0;
+        }
+
         .btn-primary:disabled {
             background: #94c4f7;
             cursor: not-allowed;
@@ -111,6 +136,7 @@
             margin-bottom: 16px;
             background: #fafafa;
         }
+
         .chat-msg {
             margin-bottom: 16px;
             padding: 12px 16px;
@@ -119,15 +145,18 @@
             line-height: 1.6;
             font-size: 14px;
         }
+
         .chat-msg.user {
             background: #e3f2fd;
             margin-left: auto;
             text-align: right;
         }
+
         .chat-msg.bot {
             background: #fff;
             border: 1px solid #eee;
         }
+
         .chat-msg .citations {
             margin-top: 8px;
             padding-top: 8px;
@@ -135,10 +164,12 @@
             font-size: 12px;
             color: #888;
         }
+
         .chat-input-row {
             display: flex;
             gap: 8px;
         }
+
         .chat-input-row input {
             flex: 1;
             padding: 10px 12px;
@@ -146,6 +177,7 @@
             border-radius: 6px;
             font-size: 14px;
         }
+
         .chat-input-row input:focus {
             outline: none;
             border-color: #1a73e8;
@@ -160,18 +192,21 @@
             line-height: 1.6;
             display: none;
         }
+
         .result-box.success {
             background: #e8f5e9;
             border: 1px solid #c8e6c9;
             color: #2e7d32;
             display: block;
         }
+
         .result-box.error {
             background: #fce4ec;
             border: 1px solid #f8bbd0;
             color: #c62828;
             display: block;
         }
+
         .result-box.info {
             background: #e3f2fd;
             border: 1px solid #bbdefb;
@@ -190,7 +225,11 @@
             font-size: 13px;
             color: #555;
         }
-        .stats-bar span { font-weight: 600; color: #1a73e8; }
+
+        .stats-bar span {
+            font-weight: 600;
+            color: #1a73e8;
+        }
 
         .loading {
             display: inline-block;
@@ -203,12 +242,18 @@
             vertical-align: middle;
             margin-left: 8px;
         }
-        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
     </style>
 </head>
+
 <body>
     <div class="container">
-        <h1>🔔 企业知识助手</h1>
+        <h1>🔔 RFP助手</h1>
 
         <div class="stats-bar" id="statsBar">
             向量库文档数：<span id="docCount">加载中...</span>
@@ -225,7 +270,8 @@
                 <div class="chat-msg bot">你好！我是企业知识助手，请输入你的问题。</div>
             </div>
             <div class="chat-input-row">
-                <input type="text" id="chatInput" placeholder="输入问题，如：高优先级告警如何处理？" onkeydown="if(event.key==='Enter')sendChat()">
+                <input type="text" id="chatInput" placeholder="输入问题，如：高优先级告警如何处理？"
+                    onkeydown="if(event.key==='Enter')sendChat()">
                 <button class="btn btn-primary" id="chatBtn" onclick="sendChat()">发送</button>
             </div>
         </div>
@@ -233,18 +279,30 @@
         <!-- 摄入 Tab -->
         <div class="tab-content" id="tab-ingest">
             <div class="form-group">
-                <label>文档来源标识 (source_id)</label>
+                <label>选择文件（支持 txt / md / json / csv）</label>
+                <input type="file" id="fileInput" accept=".txt,.md,.json,.csv,.log">
+            </div>
+
+            <div class="form-group">
+                <label>文档来源标识 (source_id，可选，不填则默认用文件名)</label>
                 <input type="text" id="sourceId" placeholder="如：alert-rule-001">
             </div>
-            <div class="form-group">
-                <label>文档内容</label>
-                <textarea id="docContent" placeholder="粘贴或输入文档内容..."></textarea>
-            </div>
+
             <div class="form-group">
                 <label>分类标签（可选）</label>
                 <input type="text" id="category" placeholder="如：告警规则、监控阈值">
             </div>
-            <button class="btn btn-primary" id="ingestBtn" onclick="ingestText()">提交摄入</button>
+
+            <div class="form-group">
+                <label>手工文本摄入（可选）</label>
+                <textarea id="docContent" placeholder="如果不上传文件，也可以直接粘贴文本到这里..."></textarea>
+            </div>
+
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="btn btn-primary" id="uploadBtn" onclick="ingestFile()">上传文件入库</button>
+                <button class="btn btn-primary" id="ingestBtn" onclick="ingestText()">提交文本摄入</button>
+            </div>
+
             <div class="result-box" id="ingestResult"></div>
         </div>
     </div>
@@ -317,16 +375,67 @@
         }
 
         // --- 文档摄入 ---
-        async function ingestText() {
+        // --- 文件上传摄入 ---
+        async function ingestFile() {
+            const fileInput = document.getElementById('fileInput');
             const sourceId = document.getElementById('sourceId').value.trim();
+            const category = document.getElementById('category').value.trim();
+            const resultBox = document.getElementById('ingestResult');
+            const btn = document.getElementById('uploadBtn');
+
+            if (!fileInput.files || fileInput.files.length === 0) {
+                resultBox.className = 'result-box error';
+                resultBox.textContent = '请先选择一个文件';
+                return;
+            }
+
+            const file = fileInput.files[0];
+            btn.disabled = true;
+            btn.innerHTML = '上传中<span class="loading"></span>';
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('source_id', sourceId);
+            formData.append('category', category);
+
+            try {
+                const res = await fetch(`${API_BASE}/ingest/file`, {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    resultBox.className = 'result-box success';
+                    resultBox.textContent = `✅ ${data.message}（切块数：${data.chunks_count}，向量库总数：${data.total_docs}）`;
+                    loadStats();
+                    fileInput.value = '';
+                    document.getElementById('sourceId').value = '';
+                    document.getElementById('category').value = '';
+                } else {
+                    resultBox.className = 'result-box error';
+                    resultBox.textContent = `❌ 错误：${JSON.stringify(data.detail || data)}`;
+                }
+            } catch (e) {
+                resultBox.className = 'result-box error';
+                resultBox.textContent = `❌ 网络错误：${e.message}`;
+            }
+
+            btn.disabled = false;
+            btn.textContent = '上传文件入库';
+        }
+
+        // --- 文本摄入 ---
+        async function ingestText() {
+            const sourceId = document.getElementById('sourceId').value.trim() || 'manual-text';
             const content = document.getElementById('docContent').value.trim();
             const category = document.getElementById('category').value.trim();
             const resultBox = document.getElementById('ingestResult');
             const btn = document.getElementById('ingestBtn');
 
-            if (!sourceId || !content) {
+            if (!content) {
                 resultBox.className = 'result-box error';
-                resultBox.textContent = '请填写文档来源标识和内容';
+                resultBox.textContent = '请填写文档内容';
                 return;
             }
 
@@ -352,10 +461,7 @@
                     resultBox.className = 'result-box success';
                     resultBox.textContent = `✅ ${data.message}（切块数：${data.chunks_count}，向量库总数：${data.total_docs}）`;
                     loadStats();
-                    // 清空表单
-                    document.getElementById('sourceId').value = '';
                     document.getElementById('docContent').value = '';
-                    document.getElementById('category').value = '';
                 } else {
                     resultBox.className = 'result-box error';
                     resultBox.textContent = `❌ 错误：${JSON.stringify(data.detail || data)}`;
@@ -366,7 +472,7 @@
             }
 
             btn.disabled = false;
-            btn.textContent = '提交摄入';
+            btn.textContent = '提交文本摄入';
         }
 
         function escapeHtml(text) {
@@ -379,4 +485,5 @@
         loadStats();
     </script>
 </body>
+
 </html>

@@ -4,6 +4,8 @@
 如果向量库为空则回退到内存假数据（兼容开发阶段）。
 """
 
+from langsmith import traceable
+
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 
 
@@ -28,7 +30,7 @@ class Retriever:
                 "content": "夜间窗口期告警可先降噪聚合再通知值班人员。",
             },
         ]
-
+    @traceable
     def retrieve(self, query: str, top_k: int = 3) -> list[dict[str, str]]:
         """检索与查询最相关的文档。
 
