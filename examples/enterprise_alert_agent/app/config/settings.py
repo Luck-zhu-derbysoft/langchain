@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
-    dashscope_api_key: str = "sk-74ce8487ee1745e697f137341890160a"
+    dashscope_api_key: str = "DASHSCOPE_API_KEY"
     model_name: str = "qwen-plus"
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     request_timeout_seconds: int = 30
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # ============== 新增：LangSmith 配置（3行） ==============
     # --- LangSmith 配置 ---
     langsmith_tracing: bool = True
-    langsmith_api_key: str = "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"
+    langsmith_api_key: str = "LANGSMITH_API_KEY"
     langsmith_project: str = "enterprise-alert-agent"
     # ================================================
 
@@ -55,11 +55,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     #mysql数据库配置
-    mysql_host: str = "10.200.0.241"
+    mysql_host: str = "mysql_host"
     mysql_port: int = 3306
-    mysql_db: str = "dmatch"
-    mysql_user: str = "root"
-    mysql_password: str = "derbysoft"
+    mysql_db: str = "mysql_db"
+    mysql_user: str = "mysql_user"
+    mysql_password: str = "mysql_password"
 
 
 settings = Settings()
