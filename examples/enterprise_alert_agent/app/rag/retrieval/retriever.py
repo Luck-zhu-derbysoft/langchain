@@ -4,17 +4,17 @@
 如果向量库为空则回退到内存假数据（兼容开发阶段）。
 """
 
-from langsmith import traceable
-
+from langsmith import RunTree
+from app.observability.langsmith_tracer import LangSmithTracer
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 
 
 class Retriever:
     """基于向量相似度的文档检索器。"""
 
-    def __init__(self, chroma_store: ChromaStore) -> None:
+    def __init__(self, chroma_store: ChromaStore, tracer: LangSmithTracer) -> None:
         self._store = chroma_store
-
+        self._tracer = tracer # 新增：保存 tracer 实例
         # 回退用的内存假数据（向量库为空时使用）
         self._fallback_docs = [
             {
@@ -30,14 +30,29 @@ class Retriever:
                 "content": "夜间窗口期告警可先降噪聚合再通知值班人员。",
             },
         ]
-    @traceable
-    def retrieve(self, query: str, top_k: int = 3) -> list[dict[str, str]]:
-        """检索与查询最相关的文档。
 
-        如果向量库有数据则走向量检索，否则回退到假数据。
-        """
-        if self._store.count() == 0:
-            # 向量库为空，回退假数据
-            return self._fallback_docs[:top_k]
+    def retrieve(self, query: str, top_k: int = 3,*, parent_run: RunTree | None = None) -> list[dict[str, str]]:
+        # 创建 retriever 层的子 run
+        run = self._tracer.start_child(
+            parent_run=parent_run,
+            name="rag.retrieve",
+            run_type="retriever",
+            inputs={"query": query, "top_k": top_k},
+            tags=["rag","retriever"],
+        )
+        try:
+            if self._store.count() == 0:
+                docs = self._fallback_docs[:top_k]
+                self._tracer.end_run(run, outputs={"hits": len(docs), "mode": "fallback"})
+                return docs
 
-        return self._store.query(query_text=query, top_k=top_k)
+            # 调用下游时透传 parent_run
+            docs = self._store.query(query, top_k=top_k, parent_run=run)
+            # vectorstore 路径记录
+            self._tracer.end_run(run, outputs={"hits": len(docs), "mode": "vectorstore"})
+            return docs
+        except Exception as e:
+            # 异常路径也要记录
+            self._tracer.end_run(run, outputs={"error": str(e)}, error=LangSmithTracer.format_error(e))
+            raise
+

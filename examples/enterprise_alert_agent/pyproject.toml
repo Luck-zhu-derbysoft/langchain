@@ -16,6 +16,8 @@ dependencies = [
     "pypdf>=5.1.0",
     "openai-agents",
     "langsmith",
+    "flashrank>=0.2.10",
+    "pymysql>=1.2.0",
 ]
 
 [project.optional-dependencies]
@@ -37,4 +39,8 @@ target-version = "py311"
 [tool.mypy]
 python_version = "3.11"
 strict = false
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pymysql.*"
 ignore_missing_imports = true

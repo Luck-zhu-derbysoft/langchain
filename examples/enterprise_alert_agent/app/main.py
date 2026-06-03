@@ -10,18 +10,19 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routers.chat import router as chat_router
-from app.api.routers.health import router as health_router
-from app.api.routers.ingest import router as ingest_router
 from app.config.settings import settings
-from app.config.tracing_config import configure_langsmith
+from app.config.tracing_config import configure_langsmith,get_langsmith_client, is_langsmith_enabled
 from app.infrastructure.llm.model_client import ModelAuthError, ModelClient, ModelRequestError
+from app.observability.langsmith_tracer import LangSmithTracer
 
 logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
     configure_langsmith()
+    from app.api.routers.chat import router as chat_router
+    from app.api.routers.health import router as health_router
+    from app.api.routers.ingest import router as ingest_router
 
     app = FastAPI(
         title=settings.app_name,
@@ -56,7 +57,14 @@ def create_app() -> FastAPI:
             return
 
         try:
-            ModelClient().probe()
+            startup_tracer = LangSmithTracer(
+                client=get_langsmith_client(),
+                _enabled=is_langsmith_enabled(),
+                project_name=settings.langsmith_project,
+                service_name="enterprise-alert-agent",
+            )
+
+            ModelClient(tracer=startup_tracer).probe()
             app.state.model_ready = True
             app.state.model_check_message = "ok"
         except ModelAuthError:

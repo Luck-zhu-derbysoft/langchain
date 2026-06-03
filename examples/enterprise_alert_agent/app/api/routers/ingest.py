@@ -13,16 +13,25 @@ from fastapi import APIRouter, Form, HTTPException, UploadFile
 from pypdf import PdfReader
 
 from app.application.services.ingest_service import IngestService
+from app.config.settings import settings
+from app.config.tracing_config import get_langsmith_client, is_langsmith_enabled
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
+from app.observability.langsmith_tracer import LangSmithTracer
 from app.schemas.ingest import IngestResponse, IngestTextRequest
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
 # 初始化依赖链：EmbeddingClient → ChromaStore → IngestService
-_embedding_client = EmbeddingClient()
-_chroma_store = ChromaStore(embedding_client=_embedding_client)
-_ingest_service = IngestService(chroma_store=_chroma_store)
+_trace = LangSmithTracer(
+    client=get_langsmith_client(),
+    _enabled=is_langsmith_enabled(),
+    project_name=settings.langsmith_project,
+    service_name="enterprise-alert-agent",
+)
+_embedding_client = EmbeddingClient(tracer=_trace)
+_chroma_store = ChromaStore(embedding_client=_embedding_client, tracer=_trace)
+_ingest_service = IngestService(chroma_store=_chroma_store, trace=_trace)
 
 
 _ALLOWED_TEXT_SUFFIXES = {".txt", ".md", ".json", ".csv", ".log"}
@@ -60,13 +69,37 @@ def ingest_text(req: IngestTextRequest) -> IngestResponse:
         "metadata": {"category": "告警规则"}
     }
     """
-    return _ingest_service.ingest_text(req)
+    root_run = _trace.start_root(
+        name="api.ingest_text",
+        run_type="chain",
+        inputs={"source_id": req.source_id, "content_length": len(req.content)},
+        tags=["api", "ingest", "text"],
+    )
+    try:
+        resp = _ingest_service.ingest_text(req, parent_run=root_run)
+        _trace.end_run(root_run, outputs=resp.model_dump())
+        return resp
+    except Exception as exc:
+        _trace.end_run(root_run, error=LangSmithTracer.format_error(exc))
+        raise
 
 
 @router.get("/stats")
 def ingest_stats() -> dict[str, int]:
     """查看当前向量库中的文档总数。"""
-    return {"total_documents": _chroma_store.count()}
+    root_run = _trace.start_root(
+        name="api.ingest_stats",
+        run_type="chain",
+        inputs={},
+        tags=["api", "ingest", "stats"],
+    )
+    try:
+        resp = {"total_documents": _chroma_store.count()}
+        _trace.end_run(root_run, outputs=resp)
+        return resp
+    except Exception as exc:
+        _trace.end_run(root_run, error=LangSmithTracer.format_error(exc))
+        raise
 
 
 @router.post("/file")
@@ -76,19 +109,31 @@ async def ingest_file(
     category: str = Form("文件导入"),
 ) -> IngestResponse:
     """接收上传文件并摄入向量库。"""
-    file_name = file.filename or "uploaded_file"
-    content_bytes = await file.read()
-    if not content_bytes:
-        raise HTTPException(status_code=400, detail="上传文件内容为空")
-    content_str = _parse_upload_to_text(file_name, content_bytes)
-    resolved_source_id = source_id.strip() or Path(file_name).stem
-    ingest_req = IngestTextRequest(
-        content=content_str,
-        source_id=resolved_source_id,
-        metadata={
-            "category": category,
-            "filename": file_name,
-            "suffix": Path(file_name).suffix,
-        },
+    root_run = _trace.start_root(
+        name="api.ingest_file",
+        run_type="chain",
+        inputs={"filename": file.filename, "source_id": source_id, "category": category},
+        tags=["api", "ingest", "file"],
     )
-    return _ingest_service.ingest_text(ingest_req)
+    file_name = file.filename or "uploaded_file"
+    try:
+        content_bytes = await file.read()
+        if not content_bytes:
+            raise HTTPException(status_code=400, detail="上传文件内容为空")
+        content_str = _parse_upload_to_text(file_name, content_bytes)
+        resolved_source_id = source_id.strip() or Path(file_name).stem
+        ingest_req = IngestTextRequest(
+            content=content_str,
+            source_id=resolved_source_id,
+            metadata={
+                "category": category,
+                "filename": file_name,
+                "suffix": Path(file_name).suffix,
+            },
+        )
+        resp = _ingest_service.ingest_text(ingest_req, parent_run=root_run)
+        _trace.end_run(root_run, outputs=resp.model_dump())
+        return resp
+    except Exception as exc:
+        _trace.end_run(root_run, error=LangSmithTracer.format_error(exc))
+        raise

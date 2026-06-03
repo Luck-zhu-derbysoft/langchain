@@ -26,6 +26,24 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 50
 
+    # ============== 新增：LangSmith 配置（3行） ==============
+    # --- LangSmith 配置 ---
+    langsmith_tracing: bool = True
+    langsmith_api_key: str = "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"
+    langsmith_project: str = "enterprise-alert-agent"
+    # ================================================
+
+    # ========================================================
+    # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
+    # ========================================================
+    agent_max_iterations: int = 2  # 允许 Agent 思考与调用工具的最大轮数
+
+    # --- 检索与重排配置 ---
+    retrieval_top_k: int = 8
+    context_top_k: int = 3
+    rerank_enabled: bool = True
+    rerank_model: str = "ms-marco-MiniLM-L-12-v2"
+
     token_budget_daily: int = 200000
     vector_db_path: str = "./data/vectorstore"
     sqlite_path: str = "./data/app.db"
@@ -36,6 +54,12 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+    #mysql数据库配置
+    mysql_host: str = "10.200.0.241"
+    mysql_port: int = 3306
+    mysql_db: str = "dmatch"
+    mysql_user: str = "root"
+    mysql_password: str = "derbysoft"
 
 
 settings = Settings()

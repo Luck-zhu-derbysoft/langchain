@@ -3,14 +3,15 @@ import sys
 from pathlib import Path
 from typing import Protocol, cast
 import importlib
-from agents import TracingProcessor, set_trace_processors
 from dotenv import load_dotenv
-from langsmith.integrations.openai_agents_sdk import OpenAIAgentsTracingProcessor
+from langsmith import Client
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+_langsmith_client: Client | None = None
+_langsmith_enabled: bool | None = None
 
 class _SettingsLike(Protocol):
     langsmith_tracing: str
@@ -33,16 +34,35 @@ def _resolve_setting(name: str) -> str:
 
 
 def configure_langsmith() -> None:
+    """加载配置并初始化 LangSmith Client（从注解处理模式改为显式 Client）。"""
+    global _langsmith_client, _langsmith_enabled
+
     load_dotenv(dotenv_path=BASE_DIR / ".env")
+    # 环境变量优先，其次 settings
+    tracing = os.getenv("LANGSMITH_TRACING", str(settings.langsmith_tracing)).strip().lower()
+    api_key = os.getenv("LANGSMITH_API_KEY", settings.langsmith_api_key).strip()
+    project = os.getenv("LANGSMITH_PROJECT", settings.langsmith_project).strip()
 
-    os.environ["LANGSMITH_TRACING"] = _resolve_setting("LANGSMITH_TRACING")
-    os.environ["LANGSMITH_API_KEY"] = _resolve_setting("LANGSMITH_API_KEY")
-    os.environ["LANGSMITH_PROJECT"] = _resolve_setting("LANGSMITH_PROJECT")
+    os.environ["LANGSMITH_TRACING"] = tracing
+    os.environ["LANGSMITH_API_KEY"] = api_key
+    os.environ["LANGSMITH_PROJECT"] = project
 
-    # # 可选：自定义 trace 的基础名称（会作为所有 trace 的前缀）
-    # os.environ["LANGSMITH_BASE_RUN_NAME"] = "Agent workflow"
+    # 判断是否启用追踪
+    _langsmith_enabled = tracing in ("1", "true", "yes")
 
-    langsmith_key = os.getenv("LANGSMITH_API_KEY")
-    if langsmith_key:
-        set_trace_processors(cast(list[TracingProcessor], [OpenAIAgentsTracingProcessor()]))
-    print("✅ LangSmith tracing configured for the entire project")
+    if _langsmith_enabled and api_key:
+        _langsmith_client = Client(api_key=api_key)
+        print("✅ LangSmith client initialized")
+    elif _langsmith_enabled:
+        print("⚠️ LangSmith tracing enabled but API key is missing. Tracing will not work.")
+    else:
+        print("ℹ️ LangSmith tracing is disabled.")
+
+
+def get_langsmith_client() -> Client | None:
+    """获取全局 LangSmith 客户端。"""
+    return _langsmith_client
+
+def is_langsmith_enabled() -> bool:
+    """检查 LangSmith 追踪是否启用。"""
+    return _langsmith_enabled is True

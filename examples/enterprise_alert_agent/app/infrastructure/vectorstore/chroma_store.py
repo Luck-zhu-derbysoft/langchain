@@ -13,13 +13,17 @@ from chromadb.config import Settings as ChromaSettings  # type: ignore[import-un
 
 from app.config.settings import settings
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
+from langsmith.run_trees import RunTree
+from app.observability.langsmith_tracer import LangSmithTracer  # type: ignore[import-untyped]
+
 
 
 class ChromaStore:
     """基于 ChromaDB 的持久化向量存储。"""
 
-    def __init__(self, embedding_client: EmbeddingClient) -> None:
+    def __init__(self, embedding_client: EmbeddingClient,tracer:LangSmithTracer) -> None:
         self._embedding_client = embedding_client
+        self._tracer = tracer
 
         # 初始化 ChromaDB 持久化客户端
         self._chroma_client = chromadb.PersistentClient(
@@ -32,74 +36,89 @@ class ChromaStore:
             name=settings.chroma_collection_name,
             metadata={"hnsw:space": "cosine"},  # 使用余弦相似度
         )
-
+        #新增parent_run 参数和追踪逻辑
     def add_documents(
         self,
         texts: list[str],
         metadatas: list[dict[str, Any]],
         ids: list[str] | None = None,
+        *,
+        parent_run: RunTree | None = None,
     ) -> list[str]:
-        """将文本块写入向量库。
-
-        Args:
-            texts: 文本内容列表。
-            metadatas: 每条文本对应的元数据（如 source_id, filename）。
-            ids: 可选文档 ID，不传则自动生成 UUID。
-
-        Returns:
-            写入的文档 ID 列表。
-        """
-        if not texts:
-            return []
-
-        # 生成 embedding 向量
-        embeddings = self._embedding_client.embed_texts(texts)
-
-        # 自动生成 ID
-        if ids is None:
-            ids = [str(uuid.uuid4()) for _ in texts]
-
-        # 写入 ChromaDB
-        self._collection.add(
-            ids=ids,
-            embeddings=embeddings,  # type: ignore[arg-type]
-            documents=texts,
-            metadatas=metadatas,  # type: ignore[arg-type]
+        #创建 vectorstore.add_documents 子 run
+        run = self._tracer.start_child(
+            parent_run=parent_run,
+            name="vectorstore.add_documents",
+            run_type="tool",
+            inputs={"texts_count": len(texts)},
+            tags=["vectorstore", "chroma", "write"],
         )
-        return ids
+        try:
+            if not texts:
+                self._tracer.end_run(run, outputs={"inserted": 0})
+                return []
 
-    def query(self, query_text: str, top_k: int = 3) -> list[dict[str, str]]:
-        """根据查询文本检索最相似的文档。
+                # 生成 embedding 向量
+            embeddings = self._embedding_client.embed_texts(texts,parent_run=run)
 
-        Args:
-            query_text: 用户的查询文本。
-            top_k: 返回的最大文档数。
+            if ids is None:
+                ids = [str(uuid.uuid4()) for _ in texts]
 
-        Returns:
-            包含 source_id, content, score 的字典列表，按相似度降序。
-        """
-        query_embedding = self._embedding_client.embed_query(query_text)
+            self._collection.add(
+                ids=ids,
+                embeddings=embeddings,  # type: ignore[arg-type]
+                documents=texts,
+                metadatas=metadatas,  # type: ignore[arg-type]
+            )
+            self._tracer.end_run(run, outputs={"inserted": len(ids)})
+            return ids
+        except Exception as e:
+            # 新增：异常路径记录
+            self._tracer.end_run(run, error=LangSmithTracer.format_error(e))
+            raise
 
-        results = self._collection.query(
-            query_embeddings=[query_embedding],  # type: ignore[arg-type]
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-        )
+    def query(self,
+              query_text: str,
+              top_k: int = 3,
+              *,
+                parent_run: RunTree | None = None
+              ) -> list[dict[str, str]]:
+                #创建 vectorstore.query 子 run
+                run = self._tracer.start_child(
+                    parent_run=parent_run,
+                    name="vectorstore.query",
+                    run_type="retriever",
+                    inputs={"query_text": query_text, "top_k": top_k},
+                    tags=["vectorstore", "chroma", "query"],
+                )
+                try:
+                    # 新增：调用 embedding 时透传 parent_run
+                    query_embedding = self._embedding_client.embed_query(query_text, parent_run=run)
+                    results = self._collection.query(
+                        query_embeddings=[query_embedding],  # type: ignore[arg-type]
+                        n_results=top_k,
+                        include=["documents", "metadatas", "distances"],
+                    )
 
-        docs: list[dict[str, str]] = []
-        if results["documents"] and results["metadatas"] and results["distances"]:
-            for doc, meta, distance in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            ):
-                source_id = str(meta.get("source_id", "unknown")) if meta else "unknown"
-                docs.append({  # type: ignore[dict-item]
-                    "source_id": source_id,
-                    "content": doc or "",
-                    "score": f"{1 - distance:.4f}",
-                })
-        return docs
+                    docs: list[dict[str, str]] = []
+                    if results["documents"] and results["metadatas"] and results["distances"]:
+                        for doc, meta, distance in zip(
+                            results["documents"][0],
+                            results["metadatas"][0],
+                            results["distances"][0],
+                        ):
+                            source_id = str(meta.get("source_id", "unknown")) if meta else "unknown"
+                            docs.append({  # type: ignore[dict-item]
+                                "source_id": source_id,
+                                "content": doc or "",
+                                "score": f"{1 - distance:.4f}",
+                            })
+                    self._tracer.end_run(run, outputs={"hits": len(docs)})
+                    return docs
+                except Exception as e:
+                    # 新增：异常路径记录
+                    self._tracer.end_run(run, error=LangSmithTracer.format_error(e))
+                    raise
 
     def count(self) -> int:
         """返回当前 collection 中的文档总数。"""
