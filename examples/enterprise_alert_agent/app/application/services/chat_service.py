@@ -1,16 +1,21 @@
-from typing import Any, Dict
+import json
+import time
 import uuid
+from typing import Any, Dict,cast
 
-from langsmith.run_trees import RunTree
 from flashrank import Ranker, RerankRequest
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import CheckpointMetadata, empty_checkpoint
+from langgraph.checkpoint.memory import InMemorySaver
+from langsmith.run_trees import RunTree
+
 from app.config.settings import settings
 from app.infrastructure.llm.model_client import ModelClient
+from app.observability.langsmith_tracer import LangSmithTracer
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
-from app.observability.langsmith_tracer import LangSmithTracer
-from app.skill.db.sqllite_skills import DB_TOOLS_METADATA as sqlite_meta, DB_SKILL_MAP as sqlite_map
-from app.skill.db.mysql_skill import DB_TOOLS_METADATA as mysql_meta, DB_SKILL_MAP as mysql_map
-import json
+from app.skill.db.mysql_skill import DB_SKILL_MAP as mysql_map
+from app.skill.db.mysql_skill import DB_TOOLS_METADATA as mysql_meta
 
 
 class ChatService:
@@ -19,12 +24,14 @@ class ChatService:
         model_client: ModelClient,
         retriever: Retriever,
         trace: LangSmithTracer,
+        memory: InMemorySaver,
     ) -> None:
         # 新增：用于显式追踪
         self.model_client = model_client
         self.retriever = retriever
         self.trace = trace
         self._ranker: Ranker | None = None
+        self.memory = memory
         if settings.rerank_enabled:
             self._ranker = Ranker(model_name=settings.rerank_model)
 
@@ -39,12 +46,30 @@ class ChatService:
         try:
             request_id = str(uuid.uuid4())
             # 1. 装载数据库工具集
-            available_tools = sqlite_meta + mysql_meta
+            available_tools = mysql_meta
             # 2. 自动利用解包合并路由图，主程序的 if tool_name in DB_SKILL_MAP 可以无缝使用！
-            DB_SKILL_MAP = {**sqlite_map, **mysql_map}
-
+            DB_SKILL_MAP = {**mysql_map}
+            #读取记忆内容
+            user_memory= bool(req.thread_id)  # 请求中是否携带了 memory 字段，且不为 None/空
+            thread_id = req.thread_id  # 如果请求中没有 thread_id，就用 request_id 作为 thread_id
+            print(f"[memory] thread_id={thread_id}, enabled={user_memory}")
+            memory_config : RunnableConfig = {
+                "configurable":{
+                    "thread_id": thread_id,
+                    "checkpoint_ns":"chat_memory",
+                    },
+            }
+            history_text=""
+            if user_memory:
+                checkpoint_tuple = self.memory.get_tuple(memory_config)
+                if checkpoint_tuple:
+                    history_text = str(checkpoint_tuple.metadata.get("memory", "")).strip()
+                    print(f"📖 [记忆读取成功] thread_id: {thread_id} history: {history_text}")
+                else:
+                    print(f"📖 [记忆读取] 未找到对应的记忆，thread_id: {thread_id}")
+            retrieval_query = req.query
             # 调用下游时透传 parent_run
-            docs = self.retriever.retrieve(req.query, top_k=2, parent_run=ask_run)
+            docs = self.retriever.retrieve(retrieval_query, top_k=2, parent_run=ask_run)
             # flashrank
             if self._ranker is not None and docs:
                 rerank_run = self.trace.start_child(
@@ -124,10 +149,14 @@ class ChatService:
                 "如果不需要调用工具，直接给出结论。\n"
                 f"知识库背景:\n{context}"
             )
+            if history_text:
+                history_prompt_memory = self.trim_memory_by_turns(history_text, max_turns=2)
+                system_prompt += f"\n\n历史对话记忆:\n{history_prompt_memory}"
 
-            print(f"🤖 [Agent 开始思考...] 初始查询: {req.query}")
+            print(f"🤖 [Agent 开始思考...] 初始查询: {req.query} 系统提示词: {system_prompt}")
             # 3. 智能体 ReAct 推理循环
             answer = ""
+            tool_error_count = 0
             for iteration in range(settings.agent_max_iterations):
                 response_message = self.model_client.chat(
                     user_query=req.query,
@@ -145,32 +174,79 @@ class ChatService:
                     tool_name = tool_call.function.name if tool_call.function else ""
                     tool_args = tool_call.function.arguments if tool_call.function else {}
                     print(f"🤖 [Agent 决定调用工具] 工具: {tool_name} 参数: {tool_args}")
-                    if tool_name in DB_SKILL_MAP:
+                    if tool_name not in DB_SKILL_MAP:
+                        tool_error_count+=1
+                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n未知工具: {tool_name}"
+                        continue
+                    #
+                    try:
+                        actual_args = tool_args
+                        if isinstance(tool_args, str):
+                            actual_args = json.loads(tool_args)
+                        if not isinstance(actual_args, dict):
+                            raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
                         skill_func = DB_SKILL_MAP[tool_name]
-                        try:
-                            actual_args = tool_args
-                            if isinstance(tool_args, str):
-                                actual_args = json.loads(tool_args)
-                            tool_result = skill_func(**actual_args)
-                            # 将工具调用结果作为新的上下文信息添加到 system prompt 中，供下一轮思考使用
-                            system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_result}"
-                            print(f"🛠️ [工具调用结果] {tool_result}")
-                            # tool_result的数据格式Dict[str, Any] {'status': 'success', 'count': 3, 'data': [{'name': 'alert_history'}, {'name': 'sqlite_sequence'}, {'name': 'cmdb_assets'}]}
-                            answer = self.tool_result_to_string(tool_result)
-                        except json.JSONDecodeError:
-                            error_msg = f"工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
-                            system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
-                            print(f"⚠️ {error_msg}")
-                        except Exception as e:
-                            error_msg = f"工具调用失败: {e}"
-                            system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
-                            print(f"⚠️ {error_msg}")
-                    else:
-                        error_msg = f"未知工具: {tool_name}"
+                        tool_result = skill_func(**actual_args)
+
+                        # 将工具调用结果作为新的上下文信息添加到 system prompt 中，供下一轮思考使用
+                        tool_summary = self.tool_result_to_string(tool_result)
+                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
+                        print(f"🛠️ [工具调用结果] {tool_summary}")
+                        # tool_result的数据格式Dict[str, Any] {'status': 'success', 'count': 3, 'data': [{'name': 'alert_history'}, {'name': 'sqlite_sequence'}, {'name': 'cmdb_assets'}]}
+                        # answer = self.tool_result_to_string(tool_result)
+                    except json.JSONDecodeError:
+                        tool_error_count += 1
+                        error_msg = "工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
                         print(f"⚠️ {error_msg}")
+                    except Exception as e:
+                        tool_error_count += 1
+                        error_msg = f"工具调用失败: {e}"
+                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                        print(f"⚠️ {error_msg}")
+                    # else:
+                    #     error_msg = f"未知工具: {tool_name}"
+                    #     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                    #     print(f"⚠️ {error_msg}")
+            if not answer and "工具调用结果 (" in system_prompt:
+                summary_prompt = (
+                    system_prompt
+                    + "\n\n请基于上面的知识库和工具结果，输出最终结论。"
+                    + "\n要求："
+                    + "\n1) 给出明确结论；"
+                    + "\n2) 如果工具失败或数据不足，明确说明不确定性；"
+                    + "\n3) 不要再调用任何工具。"
+                )
+                print("🤖 [Agent 进入总结阶段] 生成最终结论...")
+                final_answer = self.model_client.chat(
+                    user_query=req.query,
+                    system_prompt=summary_prompt,
+                    tools=[],
+                    return_message=False,
+                    parent_run=ask_run,
+                )
+                answer = str(final_answer or "").strip()
             if not answer:
-                answer = "未能在限定轮次内生成最终答案。"
+                if tool_error_count > 0:
+                    answer = "部分数据工具调用失败，以下结论基于当前知识库与可用结果生成，建议稍后重试数据库查询。"
+                else:
+                    answer = "未能在限定轮次内生成最终答案。"
+            #补充当前返回结果到记忆体中
+            if user_memory:
+                trim_answer = self.trim_answer_by_length(answer, max_length=200)
+                new_turn = f"User: {req.query}\nAssistant: {trim_answer}"
+                merged_memory = f"{history_text}\n{new_turn}".strip()
+                merged_memory = self.trim_memory_by_turns(merged_memory, max_turns=5)
+                checkpoint = empty_checkpoint()
+                metadata = cast(CheckpointMetadata,
+                                {
+                                    "source": "input",
+                                    "step": int(time.time()),
+                                    "memory": merged_memory,
+                                },
+                            )
+                self.memory.put(memory_config, checkpoint, metadata,{})
+
             resp = ChatResponse(
                 answer=answer,
                 citations=citations,
@@ -195,18 +271,57 @@ class ChatService:
 
     @staticmethod
     def tool_result_to_string(tool_result: Dict[str, Any]) -> str:
-        # 1. 检查状态是否成功
-        if tool_result.get("status") != "success":
-            return f"查询失败: {tool_result.get('message', '未知错误')}"
+        status = tool_result.get("status", "error")
+        message = tool_result.get("message", "")
+        error_code = tool_result.get("error_code", "")
         data_list = tool_result.get("data", [])
+        if not isinstance(data_list, list):
+            data_list = []
+
+        row_count_raw = tool_result.get("row_count",tool_result.get("count",len(data_list)))
+        try :
+            row_count = int(row_count_raw)
+        except Exception:
+            row_count = len(data_list)
+
+        # 1. 检查状态是否成功
+        if status != "success":
+            return f"工具调用失败，状态: {status}, 消息: {message}, 错误码: {error_code}"
         # 2. 如果数据为空的处理
         if not data_list:
-            return "查询成功，但未找到匹配的数据。"
-        # 3. 动态解析每一行的所有键值对
-        formatted_rows = []
-        for row in data_list:
-            # 将当前行的各个字段拼接为 "key: value" 的形式，例如 "table_name: alert_history, row_count: 1"
-            row_str = ", ".join([f"{key}: {value}" for key, value in row.items()])
-            formatted_rows.append(f"- {row_str}")
-        # 4. 用换行符连接成最终的字符串输出
-        return "\n".join(formatted_rows)
+            return f"工具调用成功，但没有数据返回。消息: {message}"
+        preview_rows = data_list[:5]
+        formatted_rows: list[str] = []
+        for row in preview_rows:
+            if isinstance(row, dict):
+                row_str = ", ".join([f"{key}: {value}" for key, value in row.items()])
+                formatted_rows.append(f"- {row_str}")
+            else:
+                formatted_rows.append(f"- {str(row)}")
+        return f"工具调用成功，返回 {row_count} 行数据。前5行预览:\n" + "\n".join(formatted_rows)
+
+    @staticmethod
+    def trim_memory_by_turns(memory_text: str, max_turns: int = 5) -> str:
+        if not memory_text:
+            return ""
+        lines = memory_text.splitlines()
+        turns: list[str] = []
+        current_turn: list[str] = []
+        for line in lines:
+            if line.startswith("User: ") and current_turn:
+                turns.append("\n".join(current_turn))
+                current_turn = [line]
+            else:
+                current_turn.append(line)
+        if current_turn:
+            turns.append("\n".join(current_turn))
+        if len(turns) <= max_turns:
+            return memory_text
+        return "\n".join(turns[-max_turns:]).strip()
+
+    @staticmethod
+    def trim_answer_by_length(text: str, max_length: int = 1000) -> str:
+        if not text or len(text) <= max_length:
+            return text or ""
+        return text[:max_length].strip()
+

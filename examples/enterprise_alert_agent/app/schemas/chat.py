@@ -9,6 +9,7 @@ class Citation(BaseModel):
 class ChatRequest(BaseModel):
 	query: str = Field(..., min_length=1, description="用户问题")
 	business_context: str | None = Field(default=None, description="业务上下文")
+	thread_id: str | None = Field(default=None, description="会话线程ID，用于记忆复用")
 
 
 class ChatResponse(BaseModel):

@@ -3,7 +3,7 @@ import sqlite3
 import os
 from typing import Dict, Any
 from app.config.settings import settings
-
+from deprecated import deprecated
 # 1. 声明给大模型的 Tool 元数据（JSON Schema）
 DB_TOOLS_METADATA = [
     {
@@ -27,7 +27,7 @@ DB_TOOLS_METADATA = [
         }
     }
 ]
-
+@deprecated(reason="这个函数是技能执行体，直接被大模型调用，不建议在其他地方使用。")
 # 2. 编写具备防御性编程的数据库查询函数
 def query_local_database(sql_query: str) -> Dict[str, Any]:
     """

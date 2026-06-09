@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     mysql_db: str = "mysql_db"
     mysql_user: str = "mysql_user"
     mysql_password: str = "mysql_password"
+    sql_max_rows: int = 200
+    sql_query_timeout_seconds: int = 5
 
 
 settings = Settings()

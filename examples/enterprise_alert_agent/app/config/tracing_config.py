@@ -39,8 +39,8 @@ def configure_langsmith() -> None:
 
     load_dotenv(dotenv_path=BASE_DIR / ".env")
     # 环境变量优先，其次 settings
-    tracing = os.getenv("LANGSMITH_TRACING", str(settings.langsmith_tracing)).strip().lower()
-    api_key = os.getenv("LANGSMITH_API_KEY", settings.langsmith_api_key).strip()
+    tracing = os.getenv("langsmith_tracing", str(settings.langsmith_tracing)).strip().lower()
+    api_key = os.getenv("langsmith_api_key", settings.langsmith_api_key).strip()
     project = os.getenv("LANGSMITH_PROJECT", settings.langsmith_project).strip()
 
     os.environ["LANGSMITH_TRACING"] = tracing

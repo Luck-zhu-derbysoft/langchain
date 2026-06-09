@@ -4,6 +4,7 @@ version = "0.2.0"
 description = "Enterprise RAG and alert agent starter"
 readme = "README.md"
 requires-python = ">=3.11"
+packages = ["app"]      # 关键配置：只识别app作为主包，忽略data目录
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
@@ -18,6 +19,14 @@ dependencies = [
     "langsmith",
     "flashrank>=0.2.10",
     "pymysql>=1.2.0",
+    "langgraph>=0.2.50",          # InMemoryStore所在包，≥0.2.20才有store.memory
+    "langchain>=0.3.0",            # create_agent依赖主包
+    "langchain-core>=0.3.50",      # @tool、ToolRuntime在这里
+    "langchain-community>=0.3.0",  # 社区工具兼容包
+    "langchain-openai>=1.2.2",
+    "langgraph-checkpoint-postgres>=3.1.0",
+    "deprecated>=1.3.1",
+    "types-deprecated>=1.3.1.20260520",
 ]
 
 [project.optional-dependencies]

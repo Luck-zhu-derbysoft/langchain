@@ -30,6 +30,36 @@ DB_TOOLS_METADATA = [
     }
 ]
 
+def _error_response(
+    message: str,
+    *,
+    error_code: str,
+    latency_ms: int = 0,
+) -> Dict[str, Any]:
+    return {
+        "status": "error",
+        "error_code": error_code,
+        "message": message,
+        "latency_ms": latency_ms,
+        "row_count": 0,
+        "data": [],
+    }
+
+def _success_response(
+    data: list[Dict[str, Any]],
+    *,
+    latency_ms: int,
+) -> Dict[str, Any]:
+    return {
+        "status": "success",
+        "error_code": "",
+        "message": "ok",
+        "latency_ms": latency_ms,
+        "row_count": len(data),
+        "data": data,
+    }
+
+
 # 2. 具备防御性编程的 MySQL 查询函数
 def query_mysql_database(sql_query: str) -> Dict[str, Any]:
     """
@@ -65,15 +95,20 @@ def query_mysql_database(sql_query: str) -> Dict[str, Any]:
 
         cursor = conn.cursor()
         cursor.execute(sql_query)
-        results = cursor.fetchall()
-        cursor.close()
+        rows = cursor.fetchall()
+        data = list(rows) if rows else []  # 确保返回的是列表格式
 
-        return {"status": "success", "count": len(results), "data": results}
+        result= _success_response(data, latency_ms=0)
+        result["audit"] = {
+            "executed_query": sql_query,
+            "row_count": len(data)
+        }
+        return result
 
     except pymysql.MySQLError as e:
-        return {"status": "error", "message": f"MySQL 数据库执行异常: {str(e)}"}
+        return _error_response(message=f"MySQL 数据库执行异常: {str(e)}", error_code="MYSQL_EXECUTION_ERROR")
     except Exception as e:
-        return {"status": "error", "message": f"执行查询时发生未知错误: {str(e)}"}
+        return _error_response(message=f"执行查询时发生未知错误: {str(e)}", error_code="UNKNOWN_ERROR")
     finally:
         if conn:
             conn.close()

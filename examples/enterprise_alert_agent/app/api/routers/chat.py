@@ -13,6 +13,7 @@ from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.observability.langsmith_tracer import LangSmithTracer
+from langgraph.checkpoint.memory import InMemorySaver
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -26,11 +27,13 @@ _trace = LangSmithTracer(
 # 初始化依赖链
 _embedding_client = EmbeddingClient(tracer=_trace)
 _chroma_store = ChromaStore(embedding_client=_embedding_client,tracer=_trace)
+_memory = InMemorySaver()
 
 _chat_service = ChatService(
     model_client=ModelClient(tracer=_trace),
     retriever=Retriever(chroma_store=_chroma_store,tracer=_trace),
     trace=_trace,
+    memory=_memory,
 )
 
 

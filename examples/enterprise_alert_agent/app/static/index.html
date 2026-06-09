@@ -309,6 +309,18 @@
 
     <script>
         const API_BASE = window.location.origin;
+        const CHAT_THREAD_KEY = "chat_thread_id";
+
+        function getThreadId() {
+            let id = localStorage.getItem(CHAT_THREAD_KEY);
+            if (!id) {
+                id = (window.crypto && window.crypto.randomUUID)
+                    ? window.crypto.randomUUID()
+                    : String(Date.now());
+                localStorage.setItem(CHAT_THREAD_KEY, id);
+            }
+            return id;
+        }
 
         // --- Tab 切换 ---
         function switchTab(tab) {
@@ -350,7 +362,10 @@
                 const res = await fetch(`${API_BASE}/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query }),
+                    body: JSON.stringify({
+                        query,
+                        thread_id: getThreadId(),
+                    }),
                 });
                 const data = await res.json();
 
