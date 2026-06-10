@@ -1,9 +1,8 @@
 import json
 import time
 import uuid
-from typing import Any, Dict,cast
+from typing import Any, Callable, Dict,cast
 
-from flashrank import Ranker, RerankRequest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import CheckpointMetadata, empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
@@ -16,8 +15,10 @@ from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
 from app.skill.db.mysql_skill import DB_SKILL_MAP as mysql_map
 from app.skill.db.mysql_skill import DB_TOOLS_METADATA as mysql_meta
+from app.skill.date.time_skill import TIME_SKILL_MAP as time_map
+from app.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta
 
-
+SkillFunc = Callable[..., Dict[str, Any]]
 class ChatService:
     def __init__(
         self,
@@ -30,11 +31,7 @@ class ChatService:
         self.model_client = model_client
         self.retriever = retriever
         self.trace = trace
-        self._ranker: Ranker | None = None
         self.memory = memory
-        if settings.rerank_enabled:
-            self._ranker = Ranker(model_name=settings.rerank_model)
-
     def ask(self, req: ChatRequest, *, parent_run: RunTree | None = None) -> ChatResponse:
         ask_run = self.trace.start_child(
             parent_run=parent_run,
@@ -43,12 +40,13 @@ class ChatService:
             inputs={"query": req.query, "business_context": req.business_context},
             tags=["service", "chat"],
         )
+
         try:
             request_id = str(uuid.uuid4())
             # 1. 装载数据库工具集
-            available_tools = mysql_meta
-            # 2. 自动利用解包合并路由图，主程序的 if tool_name in DB_SKILL_MAP 可以无缝使用！
-            DB_SKILL_MAP = {**mysql_map}
+            available_tools = mysql_meta + time_meta
+            # 2. 自动利用解包合并路由图，主程序的 if tool_name in SKILL_MAP 可以无缝使用！
+            SKILL_MAP: dict[str, SkillFunc] = {**mysql_map, **time_map}
             #读取记忆内容
             user_memory= bool(req.thread_id)  # 请求中是否携带了 memory 字段，且不为 None/空
             thread_id = req.thread_id  # 如果请求中没有 thread_id，就用 request_id 作为 thread_id
@@ -67,64 +65,16 @@ class ChatService:
                     print(f"📖 [记忆读取成功] thread_id: {thread_id} history: {history_text}")
                 else:
                     print(f"📖 [记忆读取] 未找到对应的记忆，thread_id: {thread_id}")
-            retrieval_query = req.query
             # 调用下游时透传 parent_run
-            docs = self.retriever.retrieve(retrieval_query, top_k=2, parent_run=ask_run)
-            # flashrank
-            if self._ranker is not None and docs:
-                rerank_run = self.trace.start_child(
-                    parent_run=ask_run,
-                    name="rag.rerank",
-                    run_type="tool",
-                    inputs={
-                        "query": req.query,
-                        "candidate_count": len(docs),
-                        "model": settings.rerank_model,
-                    },
-                    tags=["rag", "rerank", "flashrank"],
-                )
-                try:
-                    id_to_doc: dict[str, dict[str, str]] = {}
-                    passages: list[dict[str, object]] = []
-                    for idx, doc in enumerate(docs):
-                        source_id = doc["source_id"]
-                        id_to_doc[source_id] = doc
-                        passages.append(
-                            {
-                                "id": source_id,
-                                "text": doc["content"],
-                            }
-                        )
-                    ranked = self._ranker.rerank(
-                        RerankRequest(
-                            query=req.query,
-                            passages=passages,
-                        )
-                    )
-                    reranked_docs: list[dict[str, str]] = []
-                    used_ids: set[str] = set()
-
-                    for item in ranked:
-                        ranked_id = str(item.get("id", "")).strip()
-                        if ranked_id and ranked_id in id_to_doc and ranked_id not in used_ids:
-                            reranked_docs.append(id_to_doc[ranked_id])
-                            used_ids.add(ranked_id)
-
-                    # 补齐未命中的文档，保证稳健性
-                    for pid in id_to_doc:
-                        if pid not in used_ids:
-                            reranked_docs.append(id_to_doc[pid])
-                    docs = reranked_docs
-                    self.trace.end_run(
-                        rerank_run,
-                        outputs={"reranked_count": len(docs), "status": "ok"},
-                    )
-                except Exception as e:
-                    self.trace.end_run(
-                        rerank_run,
-                        outputs={"reranked_count": 0, "status": "fallback_to_retrieval_order"},
-                        error=LangSmithTracer.format_error(e),
-                    )
+            if settings.time_query_skip_retrieval and self.is_query_time(req.query):
+                print("⏰ [时间查询] 检测到时间相关查询，跳过检索直接调用时间工具...")
+                docs = []
+            else:
+                docs = self.retriever.retrieve(req.query,
+                                            top_k=settings.retrieval_final_k,
+                                            history_text=history_text,
+                                            where=None,  # 后续可替换成租户/分类过滤
+                                            parent_run=ask_run)
             # 继续使用原始检索结果，不抛出异常
             docs = docs[: settings.context_top_k]
 
@@ -144,11 +94,17 @@ class ChatService:
             #  answer = self.model_client.chat(req.query, system_prompt,parent_run=ask_run)
 
             system_prompt = (
-                "你是一个拥有本地数据库操作权限的企业级告警分析智能体。\n"
+                "你是一个拥有本地数据库操作权限的企业级智能体。\n"
                 "请结合本地知识库指导，自主决定是否需要编写 SQL 语句查询本地数据库以获取最新的实时数据。\n"
                 "如果不需要调用工具，直接给出结论。\n"
                 f"知识库背景:\n{context}"
             )
+            if settings.time_tool_enabled :
+                system_prompt += (
+                                    "\n\n【硬规则】"
+                                    "\n- 对日期/时间相关问题，必须调用 get_current_datetime 工具。"
+                                    "\n- 禁止根据历史记忆、知识库或猜测回答日期时间。"
+                                )
             if history_text:
                 history_prompt_memory = self.trim_memory_by_turns(history_text, max_turns=2)
                 system_prompt += f"\n\n历史对话记忆:\n{history_prompt_memory}"
@@ -174,7 +130,7 @@ class ChatService:
                     tool_name = tool_call.function.name if tool_call.function else ""
                     tool_args = tool_call.function.arguments if tool_call.function else {}
                     print(f"🤖 [Agent 决定调用工具] 工具: {tool_name} 参数: {tool_args}")
-                    if tool_name not in DB_SKILL_MAP:
+                    if tool_name not in SKILL_MAP:
                         tool_error_count+=1
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n未知工具: {tool_name}"
                         continue
@@ -185,7 +141,7 @@ class ChatService:
                             actual_args = json.loads(tool_args)
                         if not isinstance(actual_args, dict):
                             raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
-                        skill_func = DB_SKILL_MAP[tool_name]
+                        skill_func = SKILL_MAP[tool_name]
                         tool_result = skill_func(**actual_args)
 
                         # 将工具调用结果作为新的上下文信息添加到 system prompt 中，供下一轮思考使用
@@ -231,8 +187,9 @@ class ChatService:
                     answer = "部分数据工具调用失败，以下结论基于当前知识库与可用结果生成，建议稍后重试数据库查询。"
                 else:
                     answer = "未能在限定轮次内生成最终答案。"
-            #补充当前返回结果到记忆体中
-            if user_memory:
+            #补充当前返回结果到记忆体中 时间数据不需要回写
+            skip_memory_write = settings.time_query_skip_memory_write and self.is_query_time(req.query)
+            if user_memory and not skip_memory_write:
                 trim_answer = self.trim_answer_by_length(answer, max_length=200)
                 new_turn = f"User: {req.query}\nAssistant: {trim_answer}"
                 merged_memory = f"{history_text}\n{new_turn}".strip()
@@ -324,4 +281,14 @@ class ChatService:
         if not text or len(text) <= max_length:
             return text or ""
         return text[:max_length].strip()
+
+    @staticmethod
+    def is_query_time(text: str) -> bool:
+        if not text:
+            return False
+        time_keywords = [
+        "今天", "日期", "几号", "星期", "几点", "当前时间",
+        "today", "date", "day", "time", "weekday"
+         ]
+        return any(keyword in text for keyword in time_keywords)
 

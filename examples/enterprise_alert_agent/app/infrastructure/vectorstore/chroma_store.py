@@ -81,7 +81,8 @@ class ChromaStore:
               query_text: str,
               top_k: int = 3,
               *,
-                parent_run: RunTree | None = None
+              where: dict[str, Any] | None = None,
+              parent_run: RunTree | None = None
               ) -> list[dict[str, str]]:
                 #创建 vectorstore.query 子 run
                 run = self._tracer.start_child(
@@ -100,18 +101,20 @@ class ChromaStore:
                         include=["documents", "metadatas", "distances"],
                     )
 
-                    docs: list[dict[str, str]] = []
+                    docs: list[dict[str, Any]] = []
                     if results["documents"] and results["metadatas"] and results["distances"]:
                         for doc, meta, distance in zip(
                             results["documents"][0],
                             results["metadatas"][0],
                             results["distances"][0],
                         ):
+                            dense_score = float(1 - float(distance))
                             source_id = str(meta.get("source_id", "unknown")) if meta else "unknown"
-                            docs.append({  # type: ignore[dict-item]
+                            docs.append({
                                 "source_id": source_id,
                                 "content": doc or "",
-                                "score": f"{1 - distance:.4f}",
+                                "metadata": meta or {},
+                                "score": f"{dense_score:.4f}",
                             })
                     self._tracer.end_run(run, outputs={"hits": len(docs)})
                     return docs

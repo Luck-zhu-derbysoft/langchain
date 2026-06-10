@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     mysql_password: str = "mysql_password"
     sql_max_rows: int = 200
     sql_query_timeout_seconds: int = 5
+    # 混合检索配置
+    retrieval_candidate_k: int = 12      # 初始召回
+    retrieval_final_k: int = 4           # 最终给上下文
+    retrieval_min_score: float = 0.45    # 过滤阈值
+    retrieval_hybrid_alpha: float = 0.7  # 稠密分占比
+    retrieval_query_rewrite: bool = True
+    retrieval_max_history_turns: int = 2
+    # --- Time / Clock Tool 配置 ---
+    app_timezone: str = "Asia/Shanghai"
+    time_tool_enabled: bool = True
+    time_query_skip_retrieval: bool = True
+    time_query_skip_memory_write: bool = True
 
 
 settings = Settings()
