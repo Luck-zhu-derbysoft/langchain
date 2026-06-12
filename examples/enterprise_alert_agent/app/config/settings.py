@@ -8,11 +8,19 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
+
     dashscope_api_key: str = "DASHSCOPE_API_KEY"
     model_name: str = "qwen-plus"
+    fallback_model_name: str = "qwen-turbo"     # 主模型失败后的降级模型
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     request_timeout_seconds: int = 30
     model_startup_probe_enabled: bool = True
+    model_max_retries: int = 2
+    agent_tool_failure_threshold: int = 2      # 工具连续失败超过此数降级为纯 RAG
+    # ========================================================
+    # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
+    # ========================================================
+    agent_max_iterations: int = 5  # 允许 Agent 思考与调用工具的最大轮数            # LLM 失败重试次数
 
     # --- Embedding 配置 ---
     embedding_model: str = "text-embedding-v3"
@@ -33,10 +41,7 @@ class Settings(BaseSettings):
     langsmith_project: str = "enterprise-alert-agent"
     # ================================================
 
-    # ========================================================
-    # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
-    # ========================================================
-    agent_max_iterations: int = 2  # 允许 Agent 思考与调用工具的最大轮数
+
 
     # --- 检索与重排配置 ---
     retrieval_top_k: int = 8
@@ -44,7 +49,7 @@ class Settings(BaseSettings):
     rerank_enabled: bool = True
     rerank_model: str = "ms-marco-MiniLM-L-12-v2"
 
-    token_budget_daily: int = 200000
+    max_tokens_per_request: int = 200000
     vector_db_path: str = "./data/vectorstore"
     sqlite_path: str = "./data/app.db"
 

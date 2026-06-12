@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict
 from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
-from app.infrastructure.llm.model_client import ModelClient
+from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
     MemoryScope,
     RedisPostgresConversationMemoryStore,
@@ -40,9 +40,8 @@ class ChatService:
             inputs={"query": req.query, "business_context": req.business_context},
             tags=["service", "chat"],
         )
-
+        request_id = str(uuid.uuid4())
         try:
-            request_id = str(uuid.uuid4())
             if self.is_query_time(req.query):
                 time_result = get_current_datetime()
                 data = time_result.get("data", [])
@@ -120,13 +119,16 @@ class ChatService:
             # 3. 智能体 ReAct 推理循环
             answer = ""
             tool_error_count = 0
+            rag_only_mode = False
+            _token_counter = [0]   # ← 新增：可变列表用于跨调用累计 token
             for iteration in range(settings.agent_max_iterations):
                 response_message = self.model_client.chat(
                     user_query=req.query,
                     system_prompt=system_prompt,
-                    tools=available_tools,
+                    tools=available_tools if not rag_only_mode else [],
                     return_message=True,
                     parent_run=ask_run,
+                    _token_counter=_token_counter,  # ← 新增：传入 token 计数器
                 )
                 tool_calls = getattr(response_message, "tool_calls", [])
                 if not tool_calls:
@@ -139,9 +141,12 @@ class ChatService:
                     print(f"🤖 [Agent 决定调用工具] 工具: {tool_name} 参数: {tool_args}")
                     if tool_name not in SKILL_MAP:
                         tool_error_count+=1
-                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n未知工具: {tool_name}"
+                        error_msg = f"未知工具: {tool_name}"
+                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                        if tool_error_count >= settings.agent_tool_failure_threshold:
+                            rag_only_mode = True
+                            print("⚠️ 工具调用错误次数达到阈值，强制智能体进入总结阶段...")
                         continue
-                    #
                     try:
                         actual_args = tool_args
                         if isinstance(tool_args, str):
@@ -160,11 +165,20 @@ class ChatService:
                         error_msg = "工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
                         print(f"⚠️ {error_msg}")
+                        if tool_error_count >= settings.agent_tool_failure_threshold:
+                            rag_only_mode = True
+                            print("⚠️ 工具调用错误次数达到阈值，强制智能体进入总结阶段...")
+                            break
                     except Exception as e:
                         tool_error_count += 1
                         error_msg = f"工具调用失败: {e}"
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
                         print(f"⚠️ {error_msg}")
+                        if tool_error_count >= settings.agent_tool_failure_threshold:
+                            rag_only_mode = True
+                            print("⚠️ 工具调用错误次数达到阈值，强制智能体进入总结阶段...")
+                            break
+
             if not answer and "工具调用结果 (" in system_prompt:
                 summary_prompt = (
                     system_prompt
@@ -181,6 +195,7 @@ class ChatService:
                     tools=[],
                     return_message=False,
                     parent_run=ask_run,
+                    _token_counter=_token_counter,  # ← 新增：传入 token 计数器
                 )
                 answer = str(final_answer or "").strip()
             if not answer:
@@ -229,6 +244,14 @@ class ChatService:
                 },
             )
             return resp
+        except BudgetExceededError as e:
+                self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
+                return ChatResponse(
+                    answer=str(e),
+                    citations=[],
+                    model=settings.model_name,
+                    request_id=request_id,
+                )
 
         except Exception as e:
             # 在异常情况下也要结束追踪
@@ -321,6 +344,7 @@ class ChatService:
             tools=[],
             return_message=False,
             parent_run=parent_run,
+            _token_counter=None,  # 摘要生成不计入主对话的 token 统计
         )
         return str(summary or "").strip()
 
