@@ -11,9 +11,9 @@ from app.infrastructure.llm.model_client import (
 )
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.rag.retrieval.retriever import Retriever
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest, ChatResponse, ClearRequest
 from app.observability.langsmith_tracer import LangSmithTracer
-from langgraph.checkpoint.memory import InMemorySaver
+from app.infrastructure.memory.redis_postgres_conversation_memory import RedisPostgresConversationMemoryStore,MemoryScope
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -27,7 +27,7 @@ _trace = LangSmithTracer(
 # 初始化依赖链
 _embedding_client = EmbeddingClient(tracer=_trace)
 _chroma_store = ChromaStore(embedding_client=_embedding_client,tracer=_trace)
-_memory = InMemorySaver()
+_memory = RedisPostgresConversationMemoryStore()
 
 _chat_service = ChatService(
     model_client=ModelClient(tracer=_trace),
@@ -85,3 +85,14 @@ def chat(req: ChatRequest) -> ChatResponse:
             error=LangSmithTracer.format_error(exc),
         )
         raise
+
+
+@router.post("/memory/clear")
+def clear_memory(req: ClearRequest) -> dict[str, str]:
+    scope = MemoryScope(
+        tenant_id=req.tenant_id,
+        user_id=req.user_id,
+        thread_id=req.thread_id,
+    )
+    _memory.clear_memory(scope)
+    return {"message": "Memory cleared for the specified thread."}

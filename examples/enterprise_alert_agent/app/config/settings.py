@@ -74,6 +74,23 @@ class Settings(BaseSettings):
     time_tool_enabled: bool = True
     time_query_skip_retrieval: bool = True
     time_query_skip_memory_write: bool = True
+    # redis配置
+    redis_host: str = "10.200.0.241"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: str = "derbysoft"
+    memory_redact_pii: bool = True
+    memory_ttl_days: int = 7
+    redis_cache_ttl_seconds: int = 3600
+    memory_summary_update_turn_threshold: int = 5
+    cache_recent_turns_limit: int = 10
+    # PostgreSQL 配置（替代 MySQL）
+    pg_host: str = "localhost"
+    pg_port: int = 5432
+    pg_db: str = "rag"
+    pg_user: str = "postgres"
+    pg_password: str = "admin"
+    pg_ssl_mode: str = "prefer"
 
 
 settings = Settings()

@@ -1,22 +1,22 @@
 import json
-import time
 import uuid
-from typing import Any, Callable, Dict,cast
+from typing import Any, Callable, Dict
 
-from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.base import CheckpointMetadata, empty_checkpoint
-from langgraph.checkpoint.memory import InMemorySaver
 from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
 from app.infrastructure.llm.model_client import ModelClient
+from app.infrastructure.memory.redis_postgres_conversation_memory import (
+    MemoryScope,
+    RedisPostgresConversationMemoryStore,
+)
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
+from app.skill.date.time_skill import TIME_SKILL_MAP as time_map, get_current_datetime
+from app.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta
 from app.skill.db.mysql_skill import DB_SKILL_MAP as mysql_map
 from app.skill.db.mysql_skill import DB_TOOLS_METADATA as mysql_meta
-from app.skill.date.time_skill import TIME_SKILL_MAP as time_map
-from app.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta
 
 SkillFunc = Callable[..., Dict[str, Any]]
 class ChatService:
@@ -25,7 +25,7 @@ class ChatService:
         model_client: ModelClient,
         retriever: Retriever,
         trace: LangSmithTracer,
-        memory: InMemorySaver,
+        memory: RedisPostgresConversationMemoryStore,
     ) -> None:
         # 新增：用于显式追踪
         self.model_client = model_client
@@ -43,36 +43,50 @@ class ChatService:
 
         try:
             request_id = str(uuid.uuid4())
+            if self.is_query_time(req.query):
+                time_result = get_current_datetime()
+                data = time_result.get("data", [])
+                item = data[0] if data else {}
+                answer = (
+                "当前时间是："
+                f"{item.get('date', '')} {item.get('time', '')} "
+                f"（{item.get('weekday_cn', '')}，{item.get('timezone', '')}）"
+                )
+                resp = ChatResponse(
+                answer=answer,
+                citations=[],
+                model=settings.model_name,
+                request_id=request_id,
+                )
+                self.trace.end_run(
+                ask_run,
+                outputs={
+                "request_id": request_id,
+                "retrieved_docs": 0,
+                "model": settings.model_name,
+                "time_direct": True,
+                "tool_iso": item.get("iso", ""),
+                "tool_timestamp": item.get("timestamp", 0),
+                },
+                )
+                return resp
             # 1. 装载数据库工具集
             available_tools = mysql_meta + time_meta
             # 2. 自动利用解包合并路由图，主程序的 if tool_name in SKILL_MAP 可以无缝使用！
             SKILL_MAP: dict[str, SkillFunc] = {**mysql_map, **time_map}
             #读取记忆内容
-            user_memory= bool(req.thread_id)  # 请求中是否携带了 memory 字段，且不为 None/空
-            thread_id = req.thread_id  # 如果请求中没有 thread_id，就用 request_id 作为 thread_id
-            print(f"[memory] thread_id={thread_id}, enabled={user_memory}")
-            memory_config : RunnableConfig = {
-                "configurable":{
-                    "thread_id": thread_id,
-                    "checkpoint_ns":"chat_memory",
-                    },
-            }
-            history_text=""
-            if user_memory:
-                checkpoint_tuple = self.memory.get_tuple(memory_config)
-                if checkpoint_tuple:
-                    history_text = str(checkpoint_tuple.metadata.get("memory", "")).strip()
-                    print(f"📖 [记忆读取成功] thread_id: {thread_id} history: {history_text}")
-                else:
-                    print(f"📖 [记忆读取] 未找到对应的记忆，thread_id: {thread_id}")
-            # 调用下游时透传 parent_run
+            history_memory_params = MemoryScope(tenant_id=req.tenant_id , user_id=req.user_id, thread_id=req.thread_id)
+            memory_context = self.memory.load_context(history_memory_params,max_turns=5)
+            history_prompt_text = memory_context.as_prompt_text()
+            current_turn_count = memory_context.turn_count
+
             if settings.time_query_skip_retrieval and self.is_query_time(req.query):
                 print("⏰ [时间查询] 检测到时间相关查询，跳过检索直接调用时间工具...")
                 docs = []
             else:
                 docs = self.retriever.retrieve(req.query,
                                             top_k=settings.retrieval_final_k,
-                                            history_text=history_text,
+                                            history_text=history_prompt_text,
                                             where=None,  # 后续可替换成租户/分类过滤
                                             parent_run=ask_run)
             # 继续使用原始检索结果，不抛出异常
@@ -86,12 +100,6 @@ class ChatService:
                 citations.append(Citation(source_id=doc["source_id"], snippet=doc["content"]))
 
             context = "\n".join(context_lines)
-            # system_prompt = (
-            #     "你是企业预警助手。请基于给定上下文回答。"
-            #     "如果上下文不足，请明确说明不确定。"
-            #     f"\n\n上下文:\n{context}"
-            # )
-            #  answer = self.model_client.chat(req.query, system_prompt,parent_run=ask_run)
 
             system_prompt = (
                 "你是一个拥有本地数据库操作权限的企业级智能体。\n"
@@ -105,9 +113,8 @@ class ChatService:
                                     "\n- 对日期/时间相关问题，必须调用 get_current_datetime 工具。"
                                     "\n- 禁止根据历史记忆、知识库或猜测回答日期时间。"
                                 )
-            if history_text:
-                history_prompt_memory = self.trim_memory_by_turns(history_text, max_turns=2)
-                system_prompt += f"\n\n历史对话记忆:\n{history_prompt_memory}"
+            if history_prompt_text:
+                system_prompt += f"\n\n历史对话记忆:\n{history_prompt_text}"
 
             print(f"🤖 [Agent 开始思考...] 初始查询: {req.query} 系统提示词: {system_prompt}")
             # 3. 智能体 ReAct 推理循环
@@ -148,8 +155,6 @@ class ChatService:
                         tool_summary = self.tool_result_to_string(tool_result)
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
                         print(f"🛠️ [工具调用结果] {tool_summary}")
-                        # tool_result的数据格式Dict[str, Any] {'status': 'success', 'count': 3, 'data': [{'name': 'alert_history'}, {'name': 'sqlite_sequence'}, {'name': 'cmdb_assets'}]}
-                        # answer = self.tool_result_to_string(tool_result)
                     except json.JSONDecodeError:
                         tool_error_count += 1
                         error_msg = "工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
@@ -160,10 +165,6 @@ class ChatService:
                         error_msg = f"工具调用失败: {e}"
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
                         print(f"⚠️ {error_msg}")
-                    # else:
-                    #     error_msg = f"未知工具: {tool_name}"
-                    #     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
-                    #     print(f"⚠️ {error_msg}")
             if not answer and "工具调用结果 (" in system_prompt:
                 summary_prompt = (
                     system_prompt
@@ -189,20 +190,28 @@ class ChatService:
                     answer = "未能在限定轮次内生成最终答案。"
             #补充当前返回结果到记忆体中 时间数据不需要回写
             skip_memory_write = settings.time_query_skip_memory_write and self.is_query_time(req.query)
-            if user_memory and not skip_memory_write:
-                trim_answer = self.trim_answer_by_length(answer, max_length=200)
-                new_turn = f"User: {req.query}\nAssistant: {trim_answer}"
-                merged_memory = f"{history_text}\n{new_turn}".strip()
-                merged_memory = self.trim_memory_by_turns(merged_memory, max_turns=5)
-                checkpoint = empty_checkpoint()
-                metadata = cast(CheckpointMetadata,
-                                {
-                                    "source": "input",
-                                    "step": int(time.time()),
-                                    "memory": merged_memory,
-                                },
-                            )
-                self.memory.put(memory_config, checkpoint, metadata,{})
+            if  not skip_memory_write:
+                # 1) 写入用户提问
+                self.memory.append_turn(history_memory_params,
+                                        role="user",
+                                        content=req.query,
+                                        metadata={"request_id": request_id,
+                                                   "current_turn_count": current_turn_count+1,})
+                # 2) 写入工具调用结果作为系统消息
+                self.memory.append_turn(history_memory_params,
+                                        role="assistant",
+                                        content=answer,
+                                        metadata={"request_id":request_id,
+                                                  "citations_count": len(citations),})
+                # 3) 达到阈值时更新长期摘要
+                after_turn_count = current_turn_count + 2
+                if after_turn_count >= settings.memory_summary_update_turn_threshold:
+                    summary_text = self.build_memory_summary(history_prompt_text=history_prompt_text,
+                                                user_query=req.query,
+                                                answer=answer,
+                                                parent_run=ask_run)
+
+                    self.memory.save_summary(history_memory_params, summary_text)
 
             resp = ChatResponse(
                 answer=answer,
@@ -291,4 +300,28 @@ class ChatService:
         "today", "date", "day", "time", "weekday"
          ]
         return any(keyword in text for keyword in time_keywords)
+
+    def build_memory_summary(self, history_prompt_text: str,
+                             user_query:str,answer:str,parent_run:RunTree | None = None,) -> str:
+        summary_prompt = (
+            f"请基于以下历史对话记忆、当前用户提问和智能体回答，生成一个简洁的对话摘要，供后续检索使用。"
+            f"\n要求："
+            f"\n1) 摘要内容必须包含用户提问和智能体回答的核心信息；"
+            f"\n2) 摘要尽量简洁，控制在200字以内；"
+            f"\n3) 不要包含无关细节或客套话；"
+            f"\n4) 直接输出摘要内容，不要任何额外说明。"
+            f"\n\n历史对话记忆:\n{history_prompt_text}"
+            f"\n\n当前用户提问:\n{user_query}"
+            f"\n\n智能体回答:\n{answer}"
+        )
+        print(f"📝 [生成对话摘要] 提示词: {summary_prompt}")
+        summary = self.model_client.chat(
+            user_query="请生成长期记忆摘要",
+            system_prompt=summary_prompt,
+            tools=[],
+            return_message=False,
+            parent_run=parent_run,
+        )
+        return str(summary or "").strip()
+
 

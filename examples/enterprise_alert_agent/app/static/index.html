@@ -183,6 +183,43 @@
             border-color: #1a73e8;
         }
 
+        .chat-meta-row {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .chat-meta-row input {
+            width: 100%;
+            padding: 9px 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .chat-meta-row input:focus {
+            outline: none;
+            border-color: #1a73e8;
+        }
+
+        .chat-action-row {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-bottom: 10px;
+        }
+
+        .btn-ghost {
+            background: #fff;
+            color: #1a73e8;
+            border: 1px solid #bbdefb;
+        }
+
+        .btn-ghost:hover {
+            background: #eef5ff;
+        }
+
         /* 结果/状态显示 */
         .result-box {
             margin-top: 16px;
@@ -266,6 +303,14 @@
 
         <!-- 问答 Tab -->
         <div class="tab-content active" id="tab-chat">
+            <div class="chat-meta-row">
+                <input type="text" id="tenantIdInput" placeholder="tenant_id（默认 demo-tenant）">
+                <input type="text" id="userIdInput" placeholder="user_id（默认 demo-user）">
+                <input type="text" id="bizContextInput" placeholder="business_context（可留空）">
+            </div>
+            <div class="chat-action-row">
+                <button class="btn btn-ghost" id="clearMemoryBtn" onclick="clearChatMemory()">清空当前会话记忆</button>
+            </div>
             <div class="chat-box" id="chatBox">
                 <div class="chat-msg bot">你好！我是企业知识助手，请输入你的问题。</div>
             </div>
@@ -310,6 +355,63 @@
     <script>
         const API_BASE = window.location.origin;
         const CHAT_THREAD_KEY = "chat_thread_id";
+        const CHAT_SCOPE_KEY = "chat_scope";
+
+        function getChatScope() {
+            let scope = { tenant_id: "demo-tenant", user_id: "demo-user", business_context: "" };
+            try {
+                const raw = localStorage.getItem(CHAT_SCOPE_KEY);
+                if (raw) {
+                    const parsed = JSON.parse(raw);
+                    scope = {
+                        tenant_id: String(parsed.tenant_id || scope.tenant_id),
+                        user_id: String(parsed.user_id || scope.user_id),
+                        business_context: String(parsed.business_context || ""),
+                    };
+                }
+            } catch (e) {
+                // Ignore broken local cache and fallback to defaults.
+            }
+            return scope;
+        }
+
+        function persistChatScope() {
+            const scope = {
+                tenant_id: (document.getElementById('tenantIdInput').value || '').trim() || 'demo-tenant',
+                user_id: (document.getElementById('userIdInput').value || '').trim() || 'demo-user',
+                business_context: (document.getElementById('bizContextInput').value || '').trim(),
+            };
+            localStorage.setItem(CHAT_SCOPE_KEY, JSON.stringify(scope));
+            return scope;
+        }
+
+        function initChatScope() {
+            const scope = getChatScope();
+            document.getElementById('tenantIdInput').value = scope.tenant_id;
+            document.getElementById('userIdInput').value = scope.user_id;
+            document.getElementById('bizContextInput').value = scope.business_context;
+
+            ['tenantIdInput', 'userIdInput', 'bizContextInput'].forEach((id) => {
+                document.getElementById(id).addEventListener('blur', persistChatScope);
+            });
+        }
+
+        function formatErrorDetail(detail) {
+            if (!detail) return '请求失败';
+            if (typeof detail === 'string') return detail;
+            if (Array.isArray(detail)) {
+                return detail.map((item) => {
+                    if (typeof item === 'string') return item;
+                    const loc = Array.isArray(item.loc) ? item.loc.join('.') : '';
+                    const msg = item.msg || JSON.stringify(item);
+                    return loc ? `${loc}: ${msg}` : msg;
+                }).join('；');
+            }
+            if (typeof detail === 'object') {
+                return detail.msg || JSON.stringify(detail);
+            }
+            return String(detail);
+        }
 
         function getThreadId() {
             let id = localStorage.getItem(CHAT_THREAD_KEY);
@@ -347,6 +449,7 @@
             const input = document.getElementById('chatInput');
             const query = input.value.trim();
             if (!query) return;
+            const scope = persistChatScope();
 
             const chatBox = document.getElementById('chatBox');
             const btn = document.getElementById('chatBtn');
@@ -364,7 +467,10 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         query,
+                        business_context: scope.business_context,
                         thread_id: getThreadId(),
+                        tenant_id: scope.tenant_id,
+                        user_id: scope.user_id,
                     }),
                 });
                 const data = await res.json();
@@ -378,7 +484,8 @@
                     }
                     chatBox.innerHTML += `<div class="chat-msg bot">${escapeHtml(data.answer)}${citationsHtml}</div>`;
                 } else {
-                    chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 错误：${escapeHtml(data.detail || '请求失败')}</div>`;
+                    const errMsg = formatErrorDetail(data.detail || data);
+                    chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 错误：${escapeHtml(errMsg)}</div>`;
                 }
             } catch (e) {
                 chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 网络错误：${e.message}</div>`;
@@ -387,6 +494,41 @@
             btn.disabled = false;
             btn.textContent = '发送';
             chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        async function clearChatMemory() {
+            const scope = persistChatScope();
+            const btn = document.getElementById('clearMemoryBtn');
+            btn.disabled = true;
+            btn.innerHTML = '清理中<span class="loading"></span>';
+
+            try {
+                const res = await fetch(`${API_BASE}/chat/memory/clear`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tenant_id: scope.tenant_id,
+                        user_id: scope.user_id,
+                        thread_id: getThreadId(),
+                    }),
+                });
+                const data = await res.json();
+                const chatBox = document.getElementById('chatBox');
+                if (res.ok) {
+                    localStorage.removeItem(CHAT_THREAD_KEY);
+                    chatBox.innerHTML += `<div class="chat-msg bot">🧹 ${escapeHtml(data.message || '会话记忆已清空')}</div>`;
+                } else {
+                    chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 清理失败：${escapeHtml(formatErrorDetail(data.detail || data))}</div>`;
+                }
+                chatBox.scrollTop = chatBox.scrollHeight;
+            } catch (e) {
+                const chatBox = document.getElementById('chatBox');
+                chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 清理失败：${escapeHtml(e.message)}</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+
+            btn.disabled = false;
+            btn.textContent = '清空当前会话记忆';
         }
 
         // --- 文档摄入 ---
@@ -497,6 +639,7 @@
         }
 
         // 页面加载时获取统计
+        initChatScope();
         loadStats();
     </script>
 </body>
