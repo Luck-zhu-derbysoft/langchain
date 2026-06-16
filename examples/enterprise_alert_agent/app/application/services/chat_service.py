@@ -6,17 +6,16 @@ from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
+from app.infrastructure.mcp.mcp_tool import init_mcp, get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
     MemoryScope,
     RedisPostgresConversationMemoryStore,
 )
+from app.infrastructure.skill.db.mysql_skill import MYSQL_TOOL_USER_PROMPT
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
-from app.skill.date.time_skill import TIME_SKILL_MAP as time_map, get_current_datetime
-from app.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta
-from app.skill.db.mysql_skill import DB_SKILL_MAP as mysql_map
-from app.skill.db.mysql_skill import DB_TOOLS_METADATA as mysql_meta
+from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta, get_current_datetime, TIME_SKILL_MAP
 
 SkillFunc = Callable[..., Dict[str, Any]]
 class ChatService:
@@ -70,9 +69,15 @@ class ChatService:
                 )
                 return resp
             # 1. 装载数据库工具集
-            available_tools = mysql_meta + time_meta
+            init_mcp_ok  = init_mcp()  # 确保 MCP 客户端和工具适配器已初始化，工具映射已准备好
+            if not init_mcp_ok:
+                print("⚠️ MCP 客户端初始化失败或未启用，继续使用标准工具集...")
+            mcp_tool_map = get_tool_map()
+            mcp_tool_metadata = get_tools_metadata()  # 确保 MCP 工具元数据已加载
+            available_tools = time_meta + mcp_tool_metadata
             # 2. 自动利用解包合并路由图，主程序的 if tool_name in SKILL_MAP 可以无缝使用！
-            SKILL_MAP: dict[str, SkillFunc] = {**mysql_map, **time_map}
+            SKILL_MAP: dict[str, SkillFunc] = {**TIME_SKILL_MAP, **mcp_tool_map}
+            print(f"🔧 [工具集加载] 标准工具: {len(TIME_SKILL_MAP)}, MCP工具: {len(mcp_tool_map)}")
             #读取记忆内容
             history_memory_params = MemoryScope(tenant_id=req.tenant_id , user_id=req.user_id, thread_id=req.thread_id)
             memory_context = self.memory.load_context(history_memory_params,max_turns=5)
@@ -106,6 +111,10 @@ class ChatService:
                 "如果不需要调用工具，直接给出结论。\n"
                 f"知识库背景:\n{context}"
             )
+            if "query_mysql_database" in mcp_tool_map:
+                system_prompt += (
+                    f"\nMySQL 工具使用规则:\n{MYSQL_TOOL_USER_PROMPT}"
+                )
             if settings.time_tool_enabled :
                 system_prompt += (
                                     "\n\n【硬规则】"
@@ -141,7 +150,7 @@ class ChatService:
                     print(f"🤖 [Agent 决定调用工具] 工具: {tool_name} 参数: {tool_args}")
                     if tool_name not in SKILL_MAP:
                         tool_error_count+=1
-                        error_msg = f"未知工具: {tool_name}"
+                        error_msg = f"未知工具: {tool_name}，当前可调用工具: {list(SKILL_MAP.keys())}"
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
                         if tool_error_count >= settings.agent_tool_failure_threshold:
                             rag_only_mode = True
@@ -153,10 +162,13 @@ class ChatService:
                             actual_args = json.loads(tool_args)
                         if not isinstance(actual_args, dict):
                             raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
+                        is_mcp_tool = tool_name in mcp_tool_map
+                        if is_mcp_tool:
+                            print(f"🔌 调用 MCP 工具适配器执行工具: {tool_name}")
+                        else:
+                            print(f"🔧 调用标准工具: {tool_name}")
                         skill_func = SKILL_MAP[tool_name]
                         tool_result = skill_func(**actual_args)
-
-                        # 将工具调用结果作为新的上下文信息添加到 system prompt 中，供下一轮思考使用
                         tool_summary = self.tool_result_to_string(tool_result)
                         system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
                         print(f"🛠️ [工具调用结果] {tool_summary}")

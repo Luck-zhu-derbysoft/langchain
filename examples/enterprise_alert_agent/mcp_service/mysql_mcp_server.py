@@ -1,34 +1,17 @@
-# app/skill/mysql_skills.py
-from typing import Dict, Any
+from typing import Any, Dict
+
 import pymysql
+from mcp.server.fastmcp import FastMCP
 from pymysql.cursors import DictCursor
+
 from app.config.settings import settings
 
-# 1. 声明给大模型的 MySQL Tool 元数据
-DB_TOOLS_METADATA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "query_mysql_database",
-            "description": (
-                "执行只读 SQL 语句查询远程/公司中心的 MySQL 数据库（库名：dmatch），用于获取核心业务资产配置、生产环境数据等。"
-                "注意：本工具仅支持 SELECT 查询。"
-                "【提示】：如果想查询该 MySQL 数据库中所有的表名和对应的行数，可以直接使用 MySQL 系统表查询："
-                "'SELECT table_name, table_rows AS row_count FROM information_schema.tables WHERE table_schema=\"dmatch\";'"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql_query": {
-                        "type": "string",
-                        "description": "标准的 MySQL 只读 SQL 语句。例如: 'SELECT * FROM some_mysql_table LIMIT 5;'"
-                    }
-                },
-                "required": ["sql_query"]
-            }
-        }
-    }
-]
+mcp = FastMCP(
+    "enterprise-alert-mysql-mcp",
+    host = getattr(settings, "mcp_host", "127.0.0.1"),
+    port = getattr(settings, "mcp_port", 3000),
+    streamable_http_path=getattr(settings, "mcp_path", "/mcp"),
+    )
 
 def _error_response(
     message: str,
@@ -59,8 +42,8 @@ def _success_response(
         "data": data,
     }
 
-
 # 2. 具备防御性编程的 MySQL 查询函数
+@mcp.tool()
 def query_mysql_database(sql_query: str) -> Dict[str, Any]:
     """
     Skill 执行体：安全地查询远程 MySQL 数据库
@@ -113,7 +96,6 @@ def query_mysql_database(sql_query: str) -> Dict[str, Any]:
         if conn:
             conn.close()
 
-# 技能路由字典映射
-DB_SKILL_MAP = {
-    "query_mysql_database": query_mysql_database
-}
+if __name__ == "__main__":
+    mcp.run(transport="streamable-http")
+

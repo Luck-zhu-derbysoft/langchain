@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     pg_user: str = "postgres"
     pg_password: str = "admin"
     pg_ssl_mode: str = "prefer"
+    # --- MCP 配置 ---
+    mcp_service_url: str = "http://127.0.0.1:3000/mcp"
+    mcp_enabled: bool = True
+    mcp_timeout: int = 30
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 3000
+    mcp_path: str = "/mcp"
+    mcp_api_key: str = ""
+
 
 
 settings = Settings()
