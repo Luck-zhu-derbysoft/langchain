@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 MYSQL_TOOL_USER_PROMPT = (
     "当问题需要实时业务时，优先调用MCP工具`query_mysql_database`。"
     "SQL 必须为只读语句（SELECT/SHOW/DESC/EXPLAIN）。\n"
-    "优先加LIMIT限制返回行数，默认100行，最大1000行。\n" \
+    "优先加LIMIT限制返回行数，默认10行，最大50行。\n" \
     "若不确定字段或表结构，可先使用 SHOW TABLES / DESCRIBE table_name。"
 )
 

@@ -130,6 +130,7 @@ class ChatService:
             tool_error_count = 0
             rag_only_mode = False
             _token_counter = [0]   # ← 新增：可变列表用于跨调用累计 token
+            previous_tool_calls = []  # 记录已调用过的工具，避免重复调用同一工具导致死循环
             for iteration in range(settings.agent_max_iterations):
                 response_message = self.model_client.chat(
                     user_query=req.query,
@@ -147,6 +148,11 @@ class ChatService:
                 for tool_call in tool_calls:
                     tool_name = tool_call.function.name if tool_call.function else ""
                     tool_args = tool_call.function.arguments if tool_call.function else {}
+                    if tool_name in previous_tool_calls:
+                        error_msg = f"工具 '{tool_name}' 已被调用过一次，重复调用可能导致死循环。"
+                        break  # 直接跳出工具调用循环，进入总结阶段
+                    previous_tool_calls.append(tool_name)
+
                     print(f"🤖 [Agent 决定调用工具] 工具: {tool_name} 参数: {tool_args}")
                     if tool_name not in SKILL_MAP:
                         tool_error_count+=1

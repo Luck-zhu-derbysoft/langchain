@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # ========================================================
     # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
     # ========================================================
-    agent_max_iterations: int = 5  # 允许 Agent 思考与调用工具的最大轮数            # LLM 失败重试次数
+    agent_max_iterations: int = 3  # 允许 Agent 思考与调用工具的最大轮数            # LLM 失败重试次数
 
     # --- Embedding 配置 ---
     embedding_model: str = "text-embedding-v3"
