@@ -32,7 +32,8 @@ class MCPToolAdapter:
 
                 if loop_is_running:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(asyncio.run, self.mcp_tool.call_tool(tool_name, kwargs))
+                        future = pool.submit(
+                            lambda: asyncio.run(self.mcp_tool.call_tool(tool_name, kwargs)))
                         result  =future.result()
                 else:
                     result = asyncio.run(
@@ -42,7 +43,7 @@ class MCPToolAdapter:
                     payload = result.content if isinstance(result.content, dict) else {}
                     if payload.get("status") in ("success", "error") and "data" in payload:
                         return cast(Dict[str, Any], payload)
-                    normalized_data = payload if isinstance(payload, list) else [payload] if payload else []
+                    normalized_data = [payload] if isinstance(payload, dict) else []
                     return cast(Dict[str, Any],{
                         "status": "success",
                         "error_code": "",

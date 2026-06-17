@@ -15,7 +15,8 @@ from app.infrastructure.skill.db.mysql_skill import MYSQL_TOOL_USER_PROMPT
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
-from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta, get_current_datetime, TIME_SKILL_MAP
+from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta, TIME_SKILL_MAP
+from app.tool.static import _safe_parse_intent_json, _to_bool
 
 SkillFunc = Callable[..., Dict[str, Any]]
 class ChatService:
@@ -41,51 +42,57 @@ class ChatService:
         )
         request_id = str(uuid.uuid4())
         try:
-            if self.is_query_time(req.query):
-                time_result = get_current_datetime()
-                data = time_result.get("data", [])
-                item = data[0] if data else {}
-                answer = (
-                "当前时间是："
-                f"{item.get('date', '')} {item.get('time', '')} "
-                f"（{item.get('weekday_cn', '')}，{item.get('timezone', '')}）"
-                )
-                resp = ChatResponse(
-                answer=answer,
-                citations=[],
-                model=settings.model_name,
-                request_id=request_id,
-                )
-                self.trace.end_run(
-                ask_run,
-                outputs={
-                "request_id": request_id,
-                "retrieved_docs": 0,
-                "model": settings.model_name,
-                "time_direct": True,
-                "tool_iso": item.get("iso", ""),
-                "tool_timestamp": item.get("timestamp", 0),
-                },
-                )
-                return resp
-            # 1. 装载数据库工具集
-            init_mcp_ok  = init_mcp()  # 确保 MCP 客户端和工具适配器已初始化，工具映射已准备好
-            if not init_mcp_ok:
-                print("⚠️ MCP 客户端初始化失败或未启用，继续使用标准工具集...")
-            mcp_tool_map = get_tool_map()
-            mcp_tool_metadata = get_tools_metadata()  # 确保 MCP 工具元数据已加载
-            available_tools = time_meta + mcp_tool_metadata
-            # 2. 自动利用解包合并路由图，主程序的 if tool_name in SKILL_MAP 可以无缝使用！
-            SKILL_MAP: dict[str, SkillFunc] = {**TIME_SKILL_MAP, **mcp_tool_map}
-            print(f"🔧 [工具集加载] 标准工具: {len(TIME_SKILL_MAP)}, MCP工具: {len(mcp_tool_map)}")
+            # if self.is_query_time(req.query):
+            #     time_result = get_current_datetime()
+            #     data = time_result.get("data", [])
+            #     item = data[0] if data else {}
+            #     answer = (
+            #     "当前时间是："
+            #     f"{item.get('date', '')} {item.get('time', '')} "
+            #     f"（{item.get('weekday_cn', '')}，{item.get('timezone', '')}）"
+            #     )
+            #     resp = ChatResponse(
+            #     answer=answer,
+            #     citations=[],
+            #     model=settings.model_name,
+            #     request_id=request_id,
+            #     )
+            #     self.trace.end_run(
+            #     ask_run,
+            #     outputs={
+            #     "request_id": request_id,
+            #     "retrieved_docs": 0,
+            #     "model": settings.model_name,
+            #     "time_direct": True,
+            #     "tool_iso": item.get("iso", ""),
+            #     "tool_timestamp": item.get("timestamp", 0),
+            #     },
+            #     )
+            #     return resp
+            available_tools = list(time_meta)
+            mcp_tool_map: dict[str, SkillFunc] = {}
+            mcp_tool_metadata: list = []
+            _classify_intent_result = self._classify_intent(req.query, self.model_client, parent_run=ask_run)
+            if settings.mcp_enabled and _classify_intent_result.get("mcp", True):
+                if init_mcp(): # 确保 MCP 客户端和工具适配器已初始化，工具映射已准备好
+                    print("需要启动 MCP 客户端使用标准工具集，初始化成功...")
+                    mcp_tool_map = get_tool_map()
+                    mcp_tool_metadata = get_tools_metadata()  # 确保 MCP 工具元数据已加载
+                    available_tools.extend(mcp_tool_metadata)
+                else:
+                    print("⚠️ MCP 客户端初始化失败或未启用，继续使用标准工具集...")
+
+
+
+            SKILL_MAP: dict[str, SkillFunc] = {**TIME_SKILL_MAP, **mcp_tool_map}  # 最终可用工具映射
             #读取记忆内容
             history_memory_params = MemoryScope(tenant_id=req.tenant_id , user_id=req.user_id, thread_id=req.thread_id)
             memory_context = self.memory.load_context(history_memory_params,max_turns=5)
             history_prompt_text = memory_context.as_prompt_text()
             current_turn_count = memory_context.turn_count
-
-            if settings.time_query_skip_retrieval and self.is_query_time(req.query):
-                print("⏰ [时间查询] 检测到时间相关查询，跳过检索直接调用时间工具...")
+            context = ""
+            citations: list[Citation] = []
+            if  self.is_query_time(req.query) or not _classify_intent_result.get("rag", True):
                 docs = []
             else:
                 docs = self.retriever.retrieve(req.query,
@@ -94,16 +101,15 @@ class ChatService:
                                             where=None,  # 后续可替换成租户/分类过滤
                                             parent_run=ask_run)
             # 继续使用原始检索结果，不抛出异常
-            docs = docs[: settings.context_top_k]
+                docs = docs[: settings.context_top_k]
 
-            context_lines: list[str] = []
-            citations: list[Citation] = []
+                context_lines: list[str] = []
 
-            for doc in docs:
-                context_lines.append(f"[{doc['source_id']}] {doc['content']}")
-                citations.append(Citation(source_id=doc["source_id"], snippet=doc["content"]))
+                for doc in docs:
+                    context_lines.append(f"[{doc['source_id']}] {doc['content']}")
+                    citations.append(Citation(source_id=doc["source_id"], snippet=doc["content"]))
 
-            context = "\n".join(context_lines)
+                context = "\n".join(context_lines)
 
             system_prompt = (
                 "你是一个企业级智能体。\n"
@@ -148,10 +154,11 @@ class ChatService:
                 for tool_call in tool_calls:
                     tool_name = tool_call.function.name if tool_call.function else ""
                     tool_args = tool_call.function.arguments if tool_call.function else {}
-                    if tool_name in previous_tool_calls:
-                        error_msg = f"工具 '{tool_name}' 已被调用过一次，重复调用可能导致死循环。"
-                        break  # 直接跳出工具调用循环，进入总结阶段
-                    previous_tool_calls.append(tool_name)
+                    tool_signature = f"{tool_name}:{tool_args}"
+                    if tool_signature in previous_tool_calls:
+                            error_msg = f"工具 '{tool_name}' 使用相同参数被重复调用，可能导致死循环。"
+                            break  # 直接跳出工具调用循环，进入总结阶段
+                    previous_tool_calls.append(tool_signature)
 
                     print(f"🤖 [Agent 决定调用工具] 工具: {tool_name} 参数: {tool_args}")
                     if tool_name not in SKILL_MAP:
@@ -365,5 +372,37 @@ class ChatService:
             _token_counter=None,  # 摘要生成不计入主对话的 token 统计
         )
         return str(summary or "").strip()
+
+    @staticmethod
+    def _classify_intent(query: str, model_client: ModelClient, parent_run: RunTree | None = None) -> dict[str, bool]:
+        """
+        用轻量 LLM 调用对问题做意图分类，决定需要激活哪些模块。
+        """
+        classify_prompt = (
+            "你是一个意图分类器，只需要判断问题的类型，不要回答问题本身。\n"
+            "请判断以下问题是否需要：\n"
+            "1. 查询数据库（需要实时数据、记录、统计、列表等）\n"
+            "2. 查阅知识库（需要规则、背景知识、文档、操作指南等）\n\n"
+            "只输出 JSON，格式如下，不要任何多余文字：\n"
+            '{"need_db": true/false, "need_rag": true/false}\n\n'
+            f"问题：{query}"
+        )
+        try:
+            result = model_client.chat(
+                user_query=query,
+                system_prompt=classify_prompt,
+                tools=[],
+                return_message=False,
+                parent_run=parent_run,
+                _token_counter=None,
+            )
+            parsed = _safe_parse_intent_json(str(result or "{}"))
+            need_db = _to_bool(parsed.get("need_db", True))
+            need_rag = _to_bool(parsed.get("need_rag", True))
+            print(f"🧩 [意图分类] need_db={need_db}, need_rag={need_rag}")
+            return {"mcp": need_db, "rag": need_rag}
+        except Exception as e:
+            print(f"⚠️ [意图分类失败] 降级为全模块激活: {e}")
+            return {"mcp": True, "rag": True}  # 失败兜底：全部激活
 
 

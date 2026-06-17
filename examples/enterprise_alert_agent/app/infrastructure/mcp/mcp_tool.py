@@ -1,7 +1,6 @@
 
 
 import asyncio
-from typing import Callable, Dict
 
 from app.config.settings import settings
 from app.infrastructure.mcp.mcp_adapt import MCPToolAdapter
@@ -51,7 +50,3 @@ def get_tools_metadata() -> list:
     if _map_adapter is None:
         return []
     return _map_adapter.get_tools_metadata()
-
-# 导出给外部使用
-MCP_TOOLS_METADATA: list = []  # MCP工具的元数据列表
-MCP_SKILL_MAP: Dict[str, Callable] = {}  # 动态初始化时填充
