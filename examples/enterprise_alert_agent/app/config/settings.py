@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     mcp_port: int = 3000
     mcp_path: str = "/mcp"
     mcp_api_key: str = ""
+    mcp_enable_services: list[str] = ["mysql"]  # 允许被 MCP 调用的工具列表
 
 
 

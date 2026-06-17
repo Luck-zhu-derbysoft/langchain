@@ -106,7 +106,7 @@ class ChatService:
             context = "\n".join(context_lines)
 
             system_prompt = (
-                "你是一个拥有本地数据库操作权限的企业级智能体。\n"
+                "你是一个企业级智能体。\n"
                 "请结合本地知识库指导，自主决定是否需要编写 SQL 语句查询本地数据库以获取最新的实时数据。\n"
                 "如果不需要调用工具，直接给出结论。\n"
                 f"知识库背景:\n{context}"
