@@ -4,6 +4,7 @@
 如果向量库为空则回退到内存假数据（兼容开发阶段）。
 """
 
+import logging
 import math
 import re
 from typing import Any, Counter
@@ -13,7 +14,7 @@ from app.observability.langsmith_tracer import LangSmithTracer
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.config.settings import settings
 
-
+logger = logging.getLogger(__name__)
 
 class Retriever:
     """混合检索器，支持向量检索和基于规则的回退机制。"""
@@ -21,7 +22,8 @@ class Retriever:
     def __init__(self, chroma_store: ChromaStore, tracer: LangSmithTracer) -> None:
         self._store = chroma_store
         self._tracer = tracer # 新增：保存 tracer 实例
-        # 回退用的内存假数据（向量库为空时使用）
+        self._query_cache: dict[str, list[dict]] = {}  # 简单的查询缓存，避免重复查询同一问题
+        self._cache_max_size = 100
 
     def retrieve(self, query: str, top_k: int | None = None,*,
                  history_text: str = "",
@@ -35,6 +37,12 @@ class Retriever:
             inputs={"query": query, "top_k": top_k},
             tags=["rag","retriever"],
         )
+        cache_key = f"{query}|{history_text}"
+        if cache_key in self._query_cache:
+            cached_docs = self._query_cache[cache_key]
+            self._tracer.end_run(run, outputs={"hits": len(cached_docs), "mode": "cache"})
+            logger.debug("Cache hit for query: %s", query[:50])
+            return cached_docs
         try:
             if self._store.count() == 0:
                 self._tracer.end_run(run, outputs={"hits": 0, "mode": "fallback"})
@@ -64,6 +72,10 @@ class Retriever:
                     "final_k": final_k,
                     "filtered_count": len(filtered),
                      })
+            if len(self._query_cache) >= self._cache_max_size:
+                self._query_cache.clear()  # 简单的缓存清理策略
+            self._query_cache[cache_key] = final_docs
+            logger.debug("Cache updated for query: %s", query[:50])
             return final_docs
         except Exception as e:
             # 异常路径也要记录

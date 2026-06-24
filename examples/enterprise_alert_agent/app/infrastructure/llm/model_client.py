@@ -17,6 +17,22 @@ class ModelClient:
         )
         self._tracer = tracer
 
+    def _classify_error(self, error: Exception) -> bool:
+        """判断错误是否可重试"""
+        transient_errors = (
+            APIConnectionError,
+            TimeoutError,
+            ConnectionResetError,
+        )
+        non_retryable = (
+            AuthenticationError,
+            ValueError,  # 请求格式错误
+        )
+        if isinstance(error, non_retryable):
+            return False
+        return isinstance(error, transient_errors)
+
+
     def chat(self, user_query: str,
               system_prompt: str,*,
               tools: list[dict[str, Any]] | None = None,
@@ -57,12 +73,14 @@ class ModelClient:
                         break  # 成功则跳出重试循环
                     except AuthenticationError:
                         raise  # 鉴权错误不重试，直接向上抛
-                    except (APIConnectionError, APIError) as exc:
+                    except Exception as exc:
+                        if not self._classify_error(exc):
+                            raise  # 非重试错误，直接向上抛
                         if attempt < settings.model_max_retries:
-                            logger.warning(f"LLM 请求失败，正在重试... (尝试 {attempt + 1}/{settings.model_max_retries}) 错误: {exc}")
+                                logger.warning("LLM request failed, retrying... (attempt %d/%d) error: %s", attempt + 1, settings.model_max_retries, exc)
                         else:
-                            logger.error(f"LLM 请求失败，已达到最大重试次数。错误: {exc}   尝试下一个模型...")
-
+                            logger.error("LLM request failed after %d attempts. error: %s", settings.model_max_retries, exc)
+                            break  # 当前模型重试结束，跳出重试循环尝试下一个模型候选
                 if completion is not None:
                     break  # 当前模型重试后仍失败，尝试下一个模型候选
             if completion is None:

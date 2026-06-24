@@ -1,12 +1,14 @@
+from dataclasses import dataclass, field
 import json
+import logging
 import uuid
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, TypedDict, cast
 
 from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
-from app.infrastructure.mcp.mcp_tool import init_mcp, get_tool_map, get_tools_metadata
+from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
     MemoryScope,
     RedisPostgresConversationMemoryStore,
@@ -18,7 +20,26 @@ from app.schemas.chat import ChatRequest, ChatResponse, Citation
 from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta, TIME_SKILL_MAP
 from app.tool.static import _safe_parse_intent_json, _to_bool
 
+
+
+logger = logging.getLogger(__name__)
+
 SkillFunc = Callable[..., Dict[str, Any]]
+
+@dataclass
+class AgentState:
+    answer: str = ""
+    current_turn_count: int = 0
+    token_counter: list[int] = field(default_factory=lambda: [0])
+    previous_tool_calls: set[str] = field(default_factory=set)
+    read_only_mode: bool =False
+    tool_error_count: int = 0
+
+class ToolsResolution(TypedDict):
+    available: list[dict[str, Any]]
+    skill_map: dict[str, SkillFunc]
+    mcp_map: dict[str, SkillFunc]
+
 class ChatService:
     def __init__(
         self,
@@ -42,49 +63,9 @@ class ChatService:
         )
         request_id = str(uuid.uuid4())
         try:
-            # if self.is_query_time(req.query):
-            #     time_result = get_current_datetime()
-            #     data = time_result.get("data", [])
-            #     item = data[0] if data else {}
-            #     answer = (
-            #     "当前时间是："
-            #     f"{item.get('date', '')} {item.get('time', '')} "
-            #     f"（{item.get('weekday_cn', '')}，{item.get('timezone', '')}）"
-            #     )
-            #     resp = ChatResponse(
-            #     answer=answer,
-            #     citations=[],
-            #     model=settings.model_name,
-            #     request_id=request_id,
-            #     )
-            #     self.trace.end_run(
-            #     ask_run,
-            #     outputs={
-            #     "request_id": request_id,
-            #     "retrieved_docs": 0,
-            #     "model": settings.model_name,
-            #     "time_direct": True,
-            #     "tool_iso": item.get("iso", ""),
-            #     "tool_timestamp": item.get("timestamp", 0),
-            #     },
-            #     )
-            #     return resp
-            available_tools = list(time_meta)
-            mcp_tool_map: dict[str, SkillFunc] = {}
-            mcp_tool_metadata: list = []
             _classify_intent_result = self._classify_intent(req.query, self.model_client, parent_run=ask_run)
-            if settings.mcp_enabled and _classify_intent_result.get("mcp", True):
-                if init_mcp(): # 确保 MCP 客户端和工具适配器已初始化，工具映射已准备好
-                    print("需要启动 MCP 客户端使用标准工具集，初始化成功...")
-                    mcp_tool_map = get_tool_map()
-                    mcp_tool_metadata = get_tools_metadata()  # 确保 MCP 工具元数据已加载
-                    available_tools.extend(mcp_tool_metadata)
-                else:
-                    print("⚠️ MCP 客户端初始化失败或未启用，继续使用标准工具集...")
+            available_tools, SKILL_MAP, mcp_tool_map = self._resolve_tools(_classify_intent_result)
 
-
-
-            SKILL_MAP: dict[str, SkillFunc] = {**TIME_SKILL_MAP, **mcp_tool_map}  # 最终可用工具映射
             #读取记忆内容
             history_memory_params = MemoryScope(tenant_id=req.tenant_id , user_id=req.user_id, thread_id=req.thread_id)
             memory_context = self.memory.load_context(history_memory_params,max_turns=5)
@@ -110,99 +91,12 @@ class ChatService:
                     citations.append(Citation(source_id=doc["source_id"], snippet=doc["content"]))
 
                 context = "\n".join(context_lines)
-
-            system_prompt = (
-                "你是一个企业级智能体。\n"
-                "请结合本地知识库指导，自主决定是否需要编写 SQL 语句查询本地数据库以获取最新的实时数据。\n"
-                "如果不需要调用工具，直接给出结论。\n"
-                f"知识库背景:\n{context}"
-            )
-            if "query_mysql_database" in mcp_tool_map:
-                system_prompt += (
-                    f"\nMySQL 工具使用规则:\n{MYSQL_TOOL_USER_PROMPT}"
-                )
-            if settings.time_tool_enabled :
-                system_prompt += (
-                                    "\n\n【硬规则】"
-                                    "\n- 对日期/时间相关问题，必须调用 get_current_datetime 工具。"
-                                    "\n- 禁止根据历史记忆、知识库或猜测回答日期时间。"
-                                )
-            if history_prompt_text:
-                system_prompt += f"\n\n历史对话记忆:\n{history_prompt_text}"
-
-            print(f"🤖 [Agent 开始思考...] 初始查询: {req.query} 系统提示词: {system_prompt}")
             # 3. 智能体 ReAct 推理循环
             answer = ""
-            tool_error_count = 0
-            rag_only_mode = False
-            _token_counter = [0]   # ← 新增：可变列表用于跨调用累计 token
-            previous_tool_calls = []  # 记录已调用过的工具，避免重复调用同一工具导致死循环
-            for iteration in range(settings.agent_max_iterations):
-                response_message = self.model_client.chat(
-                    user_query=req.query,
-                    system_prompt=system_prompt,
-                    tools=available_tools if not rag_only_mode else [],
-                    return_message=True,
-                    parent_run=ask_run,
-                    _token_counter=_token_counter,  # ← 新增：传入 token 计数器
-                )
-                tool_calls = getattr(response_message, "tool_calls", [])
-                if not tool_calls:
-                    print(f"🤖 [Agent 思考结束] 最终回答: {response_message.content}")
-                    answer = response_message.content or ""
-                    break  # 没有工具调用，认为智能体思考结束
-                for tool_call in tool_calls:
-                    tool_name = tool_call.function.name if tool_call.function else ""
-                    tool_args = tool_call.function.arguments if tool_call.function else {}
-                    tool_signature = f"{tool_name}:{tool_args}"
-                    if tool_signature in previous_tool_calls:
-                            error_msg = f"工具 '{tool_name}' 使用相同参数被重复调用，可能导致死循环。"
-                            break  # 直接跳出工具调用循环，进入总结阶段
-                    previous_tool_calls.append(tool_signature)
-
-                    print(f"🤖 [Agent 决定调用工具] 工具: {tool_name} 参数: {tool_args}")
-                    if tool_name not in SKILL_MAP:
-                        tool_error_count+=1
-                        error_msg = f"未知工具: {tool_name}，当前可调用工具: {list(SKILL_MAP.keys())}"
-                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
-                        if tool_error_count >= settings.agent_tool_failure_threshold:
-                            rag_only_mode = True
-                            print("⚠️ 工具调用错误次数达到阈值，强制智能体进入总结阶段...")
-                        continue
-                    try:
-                        actual_args = tool_args
-                        if isinstance(tool_args, str):
-                            actual_args = json.loads(tool_args)
-                        if not isinstance(actual_args, dict):
-                            raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
-                        is_mcp_tool = tool_name in mcp_tool_map
-                        if is_mcp_tool:
-                            print(f"🔌 调用 MCP 工具适配器执行工具: {tool_name}")
-                        else:
-                            print(f"🔧 调用标准工具: {tool_name}")
-                        skill_func = SKILL_MAP[tool_name]
-                        tool_result = skill_func(**actual_args)
-                        tool_summary = self.tool_result_to_string(tool_result)
-                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
-                        print(f"🛠️ [工具调用结果] {tool_summary}")
-                    except json.JSONDecodeError:
-                        tool_error_count += 1
-                        error_msg = "工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
-                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
-                        print(f"⚠️ {error_msg}")
-                        if tool_error_count >= settings.agent_tool_failure_threshold:
-                            rag_only_mode = True
-                            print("⚠️ 工具调用错误次数达到阈值，强制智能体进入总结阶段...")
-                            break
-                    except Exception as e:
-                        tool_error_count += 1
-                        error_msg = f"工具调用失败: {e}"
-                        system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
-                        print(f"⚠️ {error_msg}")
-                        if tool_error_count >= settings.agent_tool_failure_threshold:
-                            rag_only_mode = True
-                            print("⚠️ 工具调用错误次数达到阈值，强制智能体进入总结阶段...")
-                            break
+            state = AgentState()
+            system_prompt = self._build_base_system_prompt(context, history_prompt_text, req.query, mcp_tool_map)
+            answer = self._run_agent_loop(req.query,system_prompt,available_tools, SKILL_MAP, mcp_tool_map, state, parent_run=ask_run)
+            tool_error_count = state.tool_error_count
 
             if not answer and "工具调用结果 (" in system_prompt:
                 summary_prompt = (
@@ -213,14 +107,14 @@ class ChatService:
                     + "\n2) 如果工具失败或数据不足，明确说明不确定性；"
                     + "\n3) 不要再调用任何工具。"
                 )
-                print("🤖 [Agent 进入总结阶段] 生成最终结论...")
+                logger.info("Agent entering summary phase to generate final answer")
                 final_answer = self.model_client.chat(
                     user_query=req.query,
                     system_prompt=summary_prompt,
                     tools=[],
                     return_message=False,
                     parent_run=ask_run,
-                    _token_counter=_token_counter,  # ← 新增：传入 token 计数器
+                    _token_counter=state.token_counter,  # ← 新增：传入 token 计数器
                 )
                 answer = str(final_answer or "").strip()
             if not answer:
@@ -362,7 +256,7 @@ class ChatService:
             f"\n\n当前用户提问:\n{user_query}"
             f"\n\n智能体回答:\n{answer}"
         )
-        print(f"📝 [生成对话摘要] 提示词: {summary_prompt}")
+        logger.debug("Building memory summary, prompt length=%d", len(summary_prompt))
         summary = self.model_client.chat(
             user_query="请生成长期记忆摘要",
             system_prompt=summary_prompt,
@@ -399,10 +293,127 @@ class ChatService:
             parsed = _safe_parse_intent_json(str(result or "{}"))
             need_db = _to_bool(parsed.get("need_db", True))
             need_rag = _to_bool(parsed.get("need_rag", True))
-            print(f"🧩 [意图分类] need_db={need_db}, need_rag={need_rag}")
+            logger.info("Intent classified: need_db=%s, need_rag=%s", need_db, need_rag)
             return {"mcp": need_db, "rag": need_rag}
         except Exception as e:
-            print(f"⚠️ [意图分类失败] 降级为全模块激活: {e}")
+            logger.warning("Intent classification failed, falling back to all modules: %s", e)
             return {"mcp": True, "rag": True}  # 失败兜底：全部激活
+
+
+    def _resolve_tools(self,intent: dict[str, Any]) -> ToolsResolution:
+        available_tools:list[dict[str, Any]] = list(time_meta)
+        mcp_tool_map: dict[str, SkillFunc] = {}
+        mcp_tool_metadata: list = []
+        if settings.mcp_enabled and intent.get("mcp", True):
+            mcp_tool_map = get_tool_map()
+            mcp_tool_metadata = get_tools_metadata()  # 确保 MCP 工具元数据已加载
+            available_tools.extend(mcp_tool_metadata)
+        skill_map = {**TIME_SKILL_MAP, **mcp_tool_map}  # 最终可用工具映射
+        return ToolsResolution(
+                    available=available_tools,
+                    skill_map=skill_map,
+                    mcp_map=mcp_tool_map,
+                )
+
+
+    def _build_base_system_prompt(self, context: str, history_prompt_text: str, query: str, mcp_tool_map: dict[str, SkillFunc]) -> str:
+        system_prompt = (
+            "你是一个企业级智能体。\n"
+            "请结合本地知识库指导，自主决定是否需要编写 SQL 语句查询本地数据库以获取最新的实时数据。\n"
+            "如果不需要调用工具，直接给出结论。\n"
+            f"知识库背景:\n{context}"
+        )
+        if "query_mysql_database" in mcp_tool_map:
+            system_prompt += (
+                f"\nMySQL 工具使用规则:\n{MYSQL_TOOL_USER_PROMPT}"
+            )
+        if settings.time_tool_enabled:
+            system_prompt += (
+                "\n\n【硬规则】"
+                "\n- 对日期/时间相关问题，必须调用 get_current_datetime 工具。"
+                "\n- 禁止根据历史记忆、知识库或猜测回答日期时间。"
+            )
+        if history_prompt_text:
+            system_prompt += f"\n\n历史对话记忆:\n{history_prompt_text}"
+        return system_prompt
+
+    def _run_agent_loop(
+            self,
+            query: str,
+            system_prompt: str,
+            available_tools: list[dict[str, Any]],
+            skill_map: dict[str, SkillFunc],
+            mcp_tool_map: dict[str, SkillFunc],
+            state: AgentState,
+            parent_run: RunTree | None = None) -> str:
+        answer = ""
+        for iteration in range(settings.agent_max_iterations):
+            response_message = self.model_client.chat(
+                user_query=query,
+                system_prompt=system_prompt,
+                tools=available_tools if not state.read_only_mode else [],
+                return_message=True,
+                parent_run=parent_run,
+                _token_counter=state.token_counter,
+            )
+            tool_calls = getattr(response_message, "tool_calls", [])
+            if not tool_calls:
+                logger.info("Agent finished, no tool calls")
+                logger.debug("Agent answer preview: %s", str(response_message.content or "")[:200])
+                answer = response_message.content or ""
+                break  # 没有工具调用，认为智能体思考结束
+            for tool_call in tool_calls:
+                tool_name = tool_call.function.name if tool_call.function else ""
+                tool_args = tool_call.function.arguments if tool_call.function else {}
+                tool_signature = f"{tool_name}:{tool_args}"
+                if tool_signature in state.previous_tool_calls:
+                        error_msg = f"工具 '{tool_name}' 使用相同参数被重复调用，可能导致死循环。"
+                        break  # 直接跳出工具调用循环，进入总结阶段
+                state.previous_tool_calls.add(tool_signature)
+
+                logger.info("Agent calling tool: %s", tool_name)
+                logger.debug("tool args: %s", str(tool_args)[:200])
+                if tool_name not in skill_map:
+                    state.tool_error_count+=1
+                    error_msg = f"未知工具: {tool_name}，当前可调用工具: {list(skill_map.keys())}"
+                    system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                    if state.tool_error_count >= settings.agent_tool_failure_threshold:
+                        state.read_only_mode = True
+                        logger.warning("Tool failure threshold reached, forcing summary phase")
+                    break
+                try:
+                    actual_args = tool_args
+                    if isinstance(tool_args, str):
+                        actual_args = json.loads(tool_args)
+                    if not isinstance(actual_args, dict):
+                        raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
+                    result = skill_map[tool_name](**actual_args)
+                    tool_summary = self.tool_result_to_string(result)
+                    system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
+                    logger.debug("tool result: %s", tool_summary[:200])
+                except json.JSONDecodeError:
+                    state.tool_error_count += 1
+                    error_msg = "工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
+                    system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                    logger.warning("%s", error_msg)
+                    if state.tool_error_count >= settings.agent_tool_failure_threshold:
+                        state.read_only_mode = True
+                        logger.warning("Tool failure threshold reached, forcing summary phase")
+                        break
+                except Exception as e:
+                    state.tool_error_count += 1
+                    error_msg = f"工具调用失败: {e}"
+                    system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                    logger.warning("%s", error_msg)
+                    if state.tool_error_count >= settings.agent_tool_failure_threshold:
+                        state.read_only_mode = True
+                        logger.warning("Tool failure threshold reached, forcing summary phase")
+                        break
+        return answer
+
+
+
+
+
 
 

@@ -1,4 +1,7 @@
-from fastapi import APIRouter, HTTPException, status
+from functools import lru_cache
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.application.services.chat_service import ChatService
 from app.config.settings import settings
@@ -14,33 +17,37 @@ from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, ClearRequest
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.infrastructure.memory.redis_postgres_conversation_memory import RedisPostgresConversationMemoryStore,MemoryScope
-
+from app.main import limiter
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-_trace = LangSmithTracer(
-    client=get_langsmith_client(),
-    _enabled=is_langsmith_enabled(),
-    project_name=settings.langsmith_project,
-    service_name="enterprise-alert-agent",
+@lru_cache(maxsize=1)
+def _build_chat_service() -> ChatService:
+    # 初始化依赖链
+    _trace = LangSmithTracer(
+        client=get_langsmith_client(),
+        _enabled=is_langsmith_enabled(),
+        project_name=settings.langsmith_project,
+        service_name="enterprise-alert-agent",
+    )
+    _embedding_client = EmbeddingClient(tracer=_trace)
+    _chroma_store = ChromaStore(embedding_client=_embedding_client, tracer=_trace)
+    _memory = RedisPostgresConversationMemoryStore()
+
+    return ChatService(
+        model_client=ModelClient(tracer=_trace),
+        retriever=Retriever(chroma_store=_chroma_store, tracer=_trace),
+        trace=_trace,
+        memory=_memory,
     )
 
-# 初始化依赖链
-_embedding_client = EmbeddingClient(tracer=_trace)
-_chroma_store = ChromaStore(embedding_client=_embedding_client,tracer=_trace)
-_memory = RedisPostgresConversationMemoryStore()
-
-_chat_service = ChatService(
-    model_client=ModelClient(tracer=_trace),
-    retriever=Retriever(chroma_store=_chroma_store,tracer=_trace),
-    trace=_trace,
-    memory=_memory,
-)
-
+def _get_chat_service() -> ChatService:
+    return _build_chat_service()
 
 @router.post("", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
-    #新增root run，追踪整个聊天请求的生命周期
-    root_run = _trace.start_root(
+@limiter.limit("10/minute")
+def chat(request: Request, req: ChatRequest, service: Annotated[ChatService, Depends(_get_chat_service)]) -> ChatResponse:
+    # 新增 root run，追踪整个聊天请求的生命周期
+    root_run = service.trace.start_root(
         name="api.chat",
         run_type="chain",
         inputs={"query": req.query,"business_context": req.business_context},
@@ -49,8 +56,8 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 
     try:
-        resp = _chat_service.ask(req,parent_run=root_run)
-        _trace.end_run(
+        resp = service.ask(req,parent_run=root_run)
+        service.trace.end_run(
             root_run,
             outputs={
                 "request_id": resp.request_id,
@@ -61,7 +68,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
         return resp
     except ModelAuthError as exc:
-            _trace.end_run(
+            service.trace.end_run(
                 root_run,
                 error=LangSmithTracer.format_error(exc),
             )
@@ -70,7 +77,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 detail="模型鉴权失败，请检查 DASHSCOPE_API_KEY 是否正确且可用。",
             ) from exc
     except ModelRequestError as exc:
-        _trace.end_run(
+        service.trace.end_run(
             root_run,
             error=LangSmithTracer.format_error(exc),
         )
@@ -80,7 +87,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         ) from exc
 
     except Exception as exc:
-        _trace.end_run(
+        service.trace.end_run(
             root_run,
             error=LangSmithTracer.format_error(exc),
         )
@@ -88,11 +95,11 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 
 @router.post("/memory/clear")
-def clear_memory(req: ClearRequest) -> dict[str, str]:
+def clear_memory(req: ClearRequest, service: Annotated[ChatService, Depends(_get_chat_service)]) -> dict[str, str]:
     scope = MemoryScope(
         tenant_id=req.tenant_id,
         user_id=req.user_id,
         thread_id=req.thread_id,
     )
-    _memory.clear_memory(scope)
+    service.memory.clear_memory(scope)
     return {"message": "Memory cleared for the specified thread."}

@@ -1,10 +1,13 @@
 
 
 import asyncio
+import logging
 from typing import Any, Callable, Dict, List, cast
 
 from app.infrastructure.mcp.mcp_client import MCPClient
 import concurrent.futures
+
+logger = logging.getLogger(__name__)
 
 
 class MCPToolAdapter:
@@ -60,7 +63,7 @@ class MCPToolAdapter:
                     })
 
             except Exception as e:
-                print(f"❌ 调用 MCP 工具 {tool_name} 失败: {e}")
+                logger.exception("MCP tool %s execution failed: %s", tool_name, e)
                 return cast(Dict[str, Any],{
                     "status": "error",
                     "error_code": "MCP_EXECUTION_ERROR",

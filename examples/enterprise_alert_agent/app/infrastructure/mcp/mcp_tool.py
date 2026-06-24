@@ -1,45 +1,56 @@
 
 
 import asyncio
+import logging
+from threading import Lock
 
 from app.config.settings import settings
 from app.infrastructure.mcp.mcp_adapt import MCPToolAdapter
 from app.infrastructure.mcp.mcp_client import MCPClient
 
+logger = logging.getLogger(__name__)
+
 #全局客户端实例
 _mcp_client: MCPClient | None = None
 _map_adapter:MCPToolAdapter | None = None
+_init_lock: asyncio.Lock = asyncio.Lock()  # ← 在模块级定义
 
 
-def init_mcp() ->bool:
+async def async_init_mcp() -> bool:
     global _mcp_client, _map_adapter
-    # 这里可以进行 MCP 客户端的初始化，例如创建 MCPClient 实例、连接 MCP 服务器等
     if _map_adapter is not None:
-        print("✅ MCP 客户端已存在，跳过初始化")
+        logger.info("MCP already initialized")
         return True
     if not settings.mcp_enabled:
+        logger.info("MCP disabled by configuration")
         return False
-    try:
-        _mcp_client = MCPClient(service_url=settings.mcp_service_url,
-                                timeout=settings.mcp_timeout,
-                                api_key=settings.mcp_api_key)
-        loop = asyncio.new_event_loop()
-        mcp_client_init = loop.run_until_complete(_mcp_client.initialize())
-        loop.close()
-        if not mcp_client_init:
-            print(f"❌ MCP 客户端初始化失败 ，当前配置地址: {settings.mcp_service_url}")
-
+    async with _init_lock:
+        if _map_adapter is not None:
+            logger.info("MCP already initialized by another thread")
+            return True
+        try:
+            _mcp_client = MCPClient(service_url=settings.mcp_service_url,
+                                    timeout=settings.mcp_timeout,
+                                    api_key=settings.mcp_api_key)
+            ok = await _mcp_client.initialize()
+            if not ok:
+                logger.warning("MCP initialize failed: %s", settings.mcp_service_url)
+                return False
+            _map_adapter = MCPToolAdapter(_mcp_client)
+            _map_adapter.initialize_tools()
+            logger.info("MCP initialized successfully")
+            return True
+        # 分层捕获异常，精细化日志
+        except asyncio.TimeoutError:
+            logger.error("MCP connect timeout, service_url=%s", settings.mcp_service_url)
             return False
-        print("✅ MCP 客户端初始化成功")
-
-        _map_adapter = MCPToolAdapter(_mcp_client)
-        _map_adapter.initialize_tools()
-        print("✅ MCP 工具适配器初始化成功")
-        return True
-    except Exception as e:
-        print(f"❌ 初始化 MCP 客户端失败: {e}，当前配置: {settings.mcp_service_url}")
-        return False
-
+        except ConnectionError as e:
+            logger.error("MCP service connection refused, url=%s err=%s", settings.mcp_service_url, str(e))
+            return False
+        except Exception as e:
+            # 兜底捕获，打印完整堆栈便于排错
+            logger.error("Failed to init MCP client, config url=%s", settings.mcp_service_url, exc_info=True)
+            return False
 
 def get_tool_map() -> dict:
     if _map_adapter is None:

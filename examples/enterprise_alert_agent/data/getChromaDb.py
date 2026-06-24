@@ -72,7 +72,7 @@ for doc_id, embedding in zip(embedding_ids, embeddings):
 # collection.delete(where={"source_id": "0527001"})
 # print("deleted by where(source_id)")
 
-# # 删除 collection 中的所有数据（慎用！）
+# 删除 collection 中的所有数据（慎用！）
 # all_data = collection.get(include=[])
 # all_ids = all_data.get("ids") or []
 # if all_ids:

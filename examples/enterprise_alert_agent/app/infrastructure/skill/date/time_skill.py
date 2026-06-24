@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 from zoneinfo import ZoneInfo
 
 from app.config.settings import settings
@@ -45,6 +45,6 @@ def get_current_datetime(timezone: str | None = None) -> Dict[str, Any]:
         "data": [payload],
     }
 
-TIME_SKILL_MAP = {
+TIME_SKILL_MAP: dict[str, Callable[..., Dict[str, Any]]] = {
     "get_current_datetime": get_current_datetime,
 }

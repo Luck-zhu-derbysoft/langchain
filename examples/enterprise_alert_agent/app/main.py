@@ -7,13 +7,18 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config.settings import settings
 from app.config.tracing_config import configure_langsmith,get_langsmith_client, is_langsmith_enabled
 from app.infrastructure.llm.model_client import ModelAuthError, ModelClient, ModelRequestError
 from app.observability.langsmith_tracer import LangSmithTracer
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(chat_router)
     app.include_router(ingest_router)
+    app.state.limiter = limiter
 
     # 静态文件和首页
     static_dir = Path(__file__).parent / "static"
@@ -40,10 +46,19 @@ def create_app() -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(str(static_dir / "index.html"))
 
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request, exc):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "请求过于频繁，请稍后再试"}
+        )
+
     @app.on_event("startup")
-    def startup_checks() -> None:
+    async def startup_checks() -> None:
+        from app.infrastructure.mcp.mcp_tool import async_init_mcp
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
+        app.state.mcp_ready = False
 
         if not settings.dashscope_api_key.strip():
             msg = "DASHSCOPE_API_KEY is empty. /chat requests will fail with 401."
@@ -55,6 +70,10 @@ def create_app() -> FastAPI:
             app.state.model_ready = True
             app.state.model_check_message = "startup probe disabled"
             return
+        if settings.mcp_enabled:
+            app.state.mcp_ready = await async_init_mcp()
+            if not app.state.mcp_ready:
+                logger.warning("MCP initialization failed during startup")
 
         try:
             startup_tracer = LangSmithTracer(

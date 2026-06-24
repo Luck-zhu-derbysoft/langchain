@@ -3,6 +3,7 @@ from typing import Any, Iterator
 
 from attr import dataclass
 import psycopg
+from psycopg_pool import ConnectionPool
 from app.config.settings import settings
 import redis
 from psycopg import sql
@@ -61,6 +62,30 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             decode_responses=True,
             socket_connect_timeout=5,
         )
+        # PostgreSQL 连接池
+        self._pg_pool = ConnectionPool(
+            conninfo=f"postgresql://{settings.pg_user}:{settings.pg_password}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}",
+            min_size=2,
+            max_size=10,
+            timeout=5,
+        )
+
+        @contextmanager
+        def _pg_conn(self) -> Iterator[psycopg.Connection]:
+            conn = self._pg_pool.getconn()
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self._pg_pool.putconn(conn)  # ← 放回连接池
+
+        def __del__(self) -> None:
+            if hasattr(self, '_pg_pool'):
+                self._pg_pool.closeall()
+
         self._ttl_days = settings.memory_ttl_days
         self._cache_ttl = settings.redis_cache_ttl_seconds
         self._redact_pii = settings.memory_redact_pii

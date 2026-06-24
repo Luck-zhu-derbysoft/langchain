@@ -1,10 +1,13 @@
 
 
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
-from attr import dataclass
+from dataclasses import dataclass
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,12 +50,12 @@ class MCPClient:
         try:
             tools = await self.get_tool_list()
             if not tools:
-                print("⚠️ MCP 服务器没有提供任何工具")
+                logger.warning("MCP server returned no tools")
                 return False
             self._tools_map = {tool.name: tool for tool in tools}
             return True
         except Exception as e:
-            print(f"❌ 初始化 MCP 客户端失败: {e}")
+            logger.exception("MCP client initialization failed: %s", e)
             return False
 
     async def get_tool_list(self) -> list[MCPTool]:
@@ -87,7 +90,7 @@ class MCPClient:
                     tools.append(tool)
                 return tools
         except Exception as e:
-            print(f"❌ 获取 MCP 工具列表失败: {e}")
+            logger.exception("Failed to fetch MCP tool list: %s", e)
             return []
 
     async def call_tool(self, tool_name: str, input_data: Dict[str, Any]) -> MCPResult:
@@ -117,7 +120,7 @@ class MCPClient:
                     payload = self._extract_tool_payload(raw_result)
                     return MCPResult(success=True, content=payload)
         except Exception as e:
-            print(f"❌ 调用 MCP 工具失败: {e}")
+            logger.exception("MCP tool call failed: %s", e)
             return MCPResult(success=False, content="", error=str(e))
 
     def get_tools_metadata(self) -> List[Dict[str, Any]]:

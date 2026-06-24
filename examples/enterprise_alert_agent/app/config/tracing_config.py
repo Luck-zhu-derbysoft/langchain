@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -5,13 +6,14 @@ from typing import Protocol, cast
 import importlib
 from dotenv import load_dotenv
 from langsmith import Client
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 _langsmith_client: Client | None = None
-_langsmith_enabled: bool | None = None
+_langsmith_enabled: bool = False
 
 class _SettingsLike(Protocol):
     langsmith_tracing: str
@@ -52,11 +54,11 @@ def configure_langsmith() -> None:
 
     if _langsmith_enabled and api_key:
         _langsmith_client = Client(api_key=api_key)
-        print("✅ LangSmith client initialized")
+        logger.info("✅ LangSmith client initialized")
     elif _langsmith_enabled:
-        print("⚠️ LangSmith tracing enabled but API key is missing. Tracing will not work.")
+        logger.warning("⚠️ LangSmith tracing enabled but API key is missing. Tracing will not work.")
     else:
-        print("ℹ️ LangSmith tracing is disabled.")
+        logger.info("ℹ️ LangSmith tracing is disabled.")
 
 
 def get_langsmith_client() -> Client | None:
