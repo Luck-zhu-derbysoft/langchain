@@ -1,11 +1,16 @@
 """文档摄入服务 - 编排 切块 → 向量化 → 存储 的完整流程。"""
 
+import logging
+
 from langsmith.run_trees import RunTree
 
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.rag.splitter.text_splitter import TextSplitter
 from app.schemas.ingest import IngestResponse, IngestTextRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class IngestService:
@@ -32,10 +37,16 @@ class IngestService:
             tags=["service", "ingest"],
         )
         try:
+            logger.info(
+                "Ingest start: source_id=%s content_length=%d",
+                req.source_id, len(req.content),
+            )
             # 切块
             chunks = self._splitter.split(req.content, parent_run=ingest_run)
+            logger.info("Ingest split done: source_id=%s chunks=%d", req.source_id, len(chunks))
 
             if not chunks:
+                logger.warning("Ingest aborted: empty content for source_id=%s", req.source_id)
                 resp = IngestResponse(
                     source_id=req.source_id,
                     chunks_count=0,
@@ -64,8 +75,13 @@ class IngestService:
                 total_docs=self._store.count(),
                 message=f"成功摄入 {len(chunks)} 个文本块",
             )
+            logger.info(
+                "Ingest done: source_id=%s chunks=%d total_docs=%d",
+                req.source_id, resp.chunks_count, resp.total_docs,
+            )
             self._trace.end_run(ingest_run, outputs=resp.model_dump())
             return resp
         except Exception as exc:
+            logger.exception("Ingest failed: source_id=%s err=%s", req.source_id, exc)
             self._trace.end_run(ingest_run, error=LangSmithTracer.format_error(exc))
             raise

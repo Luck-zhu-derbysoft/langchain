@@ -62,18 +62,32 @@ class ChatService:
             tags=["service", "chat"],
         )
         request_id = str(uuid.uuid4())
+        logger.info(
+            "[%s] Chat ask start: tenant=%s user=%s thread=%s query=%s",
+            request_id, req.tenant_id, req.user_id, req.thread_id, str(req.query)[:200],
+        )
         try:
+            # 节点1：意图分类
             _classify_intent_result = self._classify_intent(req.query, self.model_client, parent_run=ask_run)
+            # 节点2：工具解析
             available_tools, SKILL_MAP, mcp_tool_map = self._resolve_tools(_classify_intent_result)
+            logger.info(
+                "[%s] Tools resolved: total=%d skills=%d mcp=%d",
+                request_id, len(available_tools), len(SKILL_MAP), len(mcp_tool_map),
+            )
 
             #读取记忆内容
+            # 节点3：加载历史记忆
             history_memory_params = MemoryScope(tenant_id=req.tenant_id , user_id=req.user_id, thread_id=req.thread_id)
             memory_context = self.memory.load_context(history_memory_params,max_turns=5)
             history_prompt_text = memory_context.as_prompt_text()
             current_turn_count = memory_context.turn_count
+            logger.info("[%s] Memory loaded: turn_count=%d", request_id, current_turn_count)
             context = ""
             citations: list[Citation] = []
+            # 节点4：RAG 检索
             if  self.is_query_time(req.query) or not _classify_intent_result.get("rag", True):
+                logger.info("[%s] RAG retrieval skipped (time query or rag disabled)", request_id)
                 docs = []
             else:
                 docs = self.retriever.retrieve(req.query,
@@ -91,12 +105,19 @@ class ChatService:
                     citations.append(Citation(source_id=doc["source_id"], snippet=doc["content"]))
 
                 context = "\n".join(context_lines)
+                logger.info("[%s] RAG retrieved %d docs (context_top_k applied)", request_id, len(docs))
             # 3. 智能体 ReAct 推理循环
+            # 节点5：智能体 ReAct 推理循环
             answer = ""
             state = AgentState()
             system_prompt = self._build_base_system_prompt(context, history_prompt_text, req.query, mcp_tool_map)
+            logger.info("[%s] Agent loop start", request_id)
             answer = self._run_agent_loop(req.query,system_prompt,available_tools, SKILL_MAP, mcp_tool_map, state, parent_run=ask_run)
             tool_error_count = state.tool_error_count
+            logger.info(
+                "[%s] Agent loop finished: answer_len=%d tool_error_count=%d",
+                request_id, len(answer or ""), tool_error_count,
+            )
 
             if not answer and "工具调用结果 (" in system_prompt:
                 summary_prompt = (
@@ -123,7 +144,10 @@ class ChatService:
                 else:
                     answer = "未能在限定轮次内生成最终答案。"
             #补充当前返回结果到记忆体中 时间数据不需要回写
+            # 节点6：回写记忆
             skip_memory_write = settings.time_query_skip_memory_write and self.is_query_time(req.query)
+            if skip_memory_write:
+                logger.info("[%s] Memory write-back skipped (time query)", request_id)
             if  not skip_memory_write:
                 # 1) 写入用户提问
                 self.memory.append_turn(history_memory_params,
@@ -139,7 +163,9 @@ class ChatService:
                                                   "citations_count": len(citations),})
                 # 3) 达到阈值时更新长期摘要
                 after_turn_count = current_turn_count + 2
+                logger.info("[%s] Memory write-back done: after_turn_count=%d", request_id, after_turn_count)
                 if after_turn_count >= settings.memory_summary_update_turn_threshold:
+                    logger.info("[%s] Updating long-term memory summary", request_id)
                     summary_text = self.build_memory_summary(history_prompt_text=history_prompt_text,
                                                 user_query=req.query,
                                                 answer=answer,
@@ -164,6 +190,7 @@ class ChatService:
             )
             return resp
         except BudgetExceededError as e:
+                logger.warning("[%s] Budget exceeded: %s", request_id, e)
                 self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
                 return ChatResponse(
                     answer=str(e),
@@ -174,6 +201,7 @@ class ChatService:
 
         except Exception as e:
             # 在异常情况下也要结束追踪
+            logger.exception("[%s] Chat ask failed: %s", request_id, e)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
             raise
 
@@ -348,6 +376,10 @@ class ChatService:
             parent_run: RunTree | None = None) -> str:
         answer = ""
         for iteration in range(settings.agent_max_iterations):
+            logger.info(
+                "Agent iteration %d/%d (read_only=%s)",
+                iteration + 1, settings.agent_max_iterations, state.read_only_mode,
+            )
             response_message = self.model_client.chat(
                 user_query=query,
                 system_prompt=system_prompt,
@@ -368,6 +400,7 @@ class ChatService:
                 tool_signature = f"{tool_name}:{tool_args}"
                 if tool_signature in state.previous_tool_calls:
                         error_msg = f"工具 '{tool_name}' 使用相同参数被重复调用，可能导致死循环。"
+                        logger.warning("Repeated tool call detected: %s", tool_signature[:200])
                         break  # 直接跳出工具调用循环，进入总结阶段
                 state.previous_tool_calls.add(tool_signature)
 
