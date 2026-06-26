@@ -1,12 +1,14 @@
 from dataclasses import dataclass, field
 import json
 import logging
+import re
 import uuid
 from typing import Any, Callable, Dict, TypedDict, cast
 
 from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
+from app.infrastructure.agent.a2a_protocol import IntentClassification
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
 from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
@@ -62,15 +64,16 @@ class ChatService:
             tags=["service", "chat"],
         )
         request_id = str(uuid.uuid4())
+        trace_id= request_id
         logger.info(
             "[%s] Chat ask start: tenant=%s user=%s thread=%s query=%s",
             request_id, req.tenant_id, req.user_id, req.thread_id, str(req.query)[:200],
         )
+        intent_classification,module_activation = self._classify_intent(req.query, self.model_client, parent_run=ask_run)
         try:
             # 节点1：意图分类
-            _classify_intent_result = self._classify_intent(req.query, self.model_client, parent_run=ask_run)
             # 节点2：工具解析
-            available_tools, SKILL_MAP, mcp_tool_map = self._resolve_tools(_classify_intent_result)
+            available_tools, SKILL_MAP, mcp_tool_map = self._resolve_tools(module_activation) # type: ignore
             logger.info(
                 "[%s] Tools resolved: total=%d skills=%d mcp=%d",
                 request_id, len(available_tools), len(SKILL_MAP), len(mcp_tool_map),
@@ -86,7 +89,7 @@ class ChatService:
             context = ""
             citations: list[Citation] = []
             # 节点4：RAG 检索
-            if  self.is_query_time(req.query) or not _classify_intent_result.get("rag", True):
+            if  self.is_query_time(req.query) or not module_activation.get("rag", True):
                 logger.info("[%s] RAG retrieval skipped (time query or rag disabled)", request_id)
                 docs = []
             else:
@@ -178,6 +181,9 @@ class ChatService:
                 citations=citations,
                 model=settings.model_name,
                 request_id=request_id,
+                intent=intent_classification.intent,
+                intent_confidence=intent_classification.confidence,
+                trace_id=trace_id,
             )
             # 新增：在响应中添加追踪信息
             self.trace.end_run(
@@ -197,6 +203,9 @@ class ChatService:
                     citations=[],
                     model=settings.model_name,
                     request_id=request_id,
+                    intent=intent_classification.intent,
+                    intent_confidence=intent_classification.confidence,
+                    trace_id=trace_id,
                 )
 
         except Exception as e:
@@ -296,18 +305,24 @@ class ChatService:
         return str(summary or "").strip()
 
     @staticmethod
-    def _classify_intent(query: str, model_client: ModelClient, parent_run: RunTree | None = None) -> dict[str, bool]:
+    def _classify_intent(query: str, model_client: ModelClient, parent_run: RunTree | None = None) -> tuple[IntentClassification, dict[str, bool]]:
         """
-        用轻量 LLM 调用对问题做意图分类，决定需要激活哪些模块。
+        分类用户意图，返回详细的意图信息 + 模块激活决策
+        Returns:
+            (IntentClassification, {"mcp": bool, "rag": bool})
         """
         classify_prompt = (
-            "你是一个意图分类器，只需要判断问题的类型，不要回答问题本身。\n"
-            "请判断以下问题是否需要：\n"
-            "1. 查询数据库（需要实时数据、记录、统计、列表等）\n"
-            "2. 查阅知识库（需要规则、背景知识、文档、操作指南等）\n\n"
-            "只输出 JSON，格式如下，不要任何多余文字：\n"
-            '{"need_db": true/false, "need_rag": true/false}\n\n'
-            f"问题：{query}"
+            "你是一个企业级意图分类器。请分析用户查询，并按以下格式返回 JSON：\n"
+            "{\n"
+            '  "intent": "意图类型，如 query_customer_info, create_order, update_record",\n'
+            '  "confidence": 0.92,\n'
+            '  "category": "retrieve|create|update|delete|other",\n'
+            '  "entities": {"key": "value"},\n'
+            '  "need_db": true,\n'
+            '  "need_rag": true,\n'
+            '  "reasoning": "分类理由"\n'
+            "}\n\n"
+            f"用户查询：{query}"
         )
         try:
             result = model_client.chat(
@@ -319,13 +334,35 @@ class ChatService:
                 _token_counter=None,
             )
             parsed = _safe_parse_intent_json(str(result or "{}"))
-            need_db = _to_bool(parsed.get("need_db", True))
-            need_rag = _to_bool(parsed.get("need_rag", True))
-            logger.info("Intent classified: need_db=%s, need_rag=%s", need_db, need_rag)
-            return {"mcp": need_db, "rag": need_rag}
+            intent_classification = IntentClassification(
+                intent=parsed.get("intent", "unknown"), # type: ignore
+                confidence=float(parsed.get("confidence", 0.0)), # type: ignore
+                category=parsed.get("category", "other"),# type: ignore
+                entities=parsed.get("entities", {}),# type: ignore
+                reasoning=parsed.get("reasoning", ""),# type: ignore
+            )
+            # 保持原有的模块激活决策
+            module_activation = {
+                "mcp": _to_bool(parsed.get("need_db", True)),
+                "rag": _to_bool(parsed.get("need_rag", True)),
+            }
+            logger.info("Intent classified: intent=%s confidence=%.2f category=%s mcp=%s rag=%s",
+                        intent_classification.intent,
+                        intent_classification.confidence,
+                        intent_classification.category,
+                        module_activation["mcp"],
+                        module_activation["rag"])
+            return intent_classification, module_activation
+
         except Exception as e:
             logger.warning("Intent classification failed, falling back to all modules: %s", e)
-            return {"mcp": True, "rag": True}  # 失败兜底：全部激活
+            return IntentClassification(
+                intent="unknown",
+                confidence=0.0,
+                category="other",
+                entities={},
+                reasoning="Intent classification failed",
+            ), {"mcp": True, "rag": True}  # 失败兜底：全部激活
 
 
     def _resolve_tools(self,intent: dict[str, Any]) -> ToolsResolution:
@@ -443,7 +480,6 @@ class ChatService:
                         logger.warning("Tool failure threshold reached, forcing summary phase")
                         break
         return answer
-
 
 
 

@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -25,3 +27,6 @@ class ChatResponse(BaseModel):
 	citations: list[Citation]
 	model: str
 	request_id: str
+	intent: Optional[str] = Field(default=None, description="意图识别结果")
+	intent_confidence: Optional[float] = Field(default=None, description="意图识别置信度")
+	trace_id: Optional[str] = Field(default=None, description="追踪ID，用于链路追踪和调试")
