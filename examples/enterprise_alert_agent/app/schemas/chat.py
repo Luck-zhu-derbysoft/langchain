@@ -30,3 +30,7 @@ class ChatResponse(BaseModel):
 	intent: Optional[str] = Field(default=None, description="意图识别结果")
 	intent_confidence: Optional[float] = Field(default=None, description="意图识别置信度")
 	trace_id: Optional[str] = Field(default=None, description="追踪ID，用于链路追踪和调试")
+	selected_tool: Optional[str] = Field(default=None, description="选择的工具名称")
+	tool_confidence: Optional[float] = Field(default=None, description="选择工具的置信度")
+	fallback_tool:list[str] = Field(default=[], description="备选工具列表")
+	tool_selection_reason: Optional[str] = Field(default=None, description="选择工具的原因")

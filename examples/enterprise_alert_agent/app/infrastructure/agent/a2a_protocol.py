@@ -1,7 +1,7 @@
 """A2A 协议 - V1 基础版本 (仅包含意图分类)"""
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Optional
 from sqlalchemy import Enum
@@ -83,5 +83,21 @@ class A2AProtocol:
     def get_intent_classification(self):
         """获取意图分类"""
         return self.intent_classification
+@dataclass
+class ToolSelection:
+    """工具选择"""
+    tool_name: str
+    """工具名称"""
+    confidence: float
+    """置信度，范围 0-1"""
+    fallback_tools: list[str] = field(default_factory=list)
+    """备用工具"""
+    reasoning: str = ""
+    """选择理由"""
+    agent_id: str = ""
+    """智能体 ID"""
+    def __post_init__(self):
+        if not (0 <= self.confidence <= 1):
+            raise ValueError(f"Confidence must be between 0 and 1, got {self.confidence}")
 
 

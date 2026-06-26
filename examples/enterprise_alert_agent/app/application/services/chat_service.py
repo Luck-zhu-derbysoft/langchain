@@ -1,14 +1,13 @@
 from dataclasses import dataclass, field
 import json
 import logging
-import re
 import uuid
 from typing import Any, Callable, Dict, TypedDict, cast
 
 from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
-from app.infrastructure.agent.a2a_protocol import IntentClassification
+from app.infrastructure.agent.a2a_protocol import IntentClassification, ToolSelection
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
 from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
@@ -70,13 +69,24 @@ class ChatService:
             request_id, req.tenant_id, req.user_id, req.thread_id, str(req.query)[:200],
         )
         intent_classification,module_activation = self._classify_intent(req.query, self.model_client, parent_run=ask_run)
+        # 初始化默认的工具选择
+        tool_selection: ToolSelection | None = None
         try:
             # 节点1：意图分类
             # 节点2：工具解析
-            available_tools, SKILL_MAP, mcp_tool_map = self._resolve_tools(module_activation) # type: ignore
+            tools_resolution = self._resolve_tools(module_activation)
+            available_tools: list[dict[str, Any]] = tools_resolution["available"]
+            SKILL_MAP: dict[str, SkillFunc] = tools_resolution["skill_map"]
+            mcp_tool_map: dict[str, SkillFunc] = tools_resolution["mcp_map"]
             logger.info(
                 "[%s] Tools resolved: total=%d skills=%d mcp=%d",
                 request_id, len(available_tools), len(SKILL_MAP), len(mcp_tool_map),
+            )
+            tool_selection = self._select_tool(
+                query=req.query,
+                intent_classification=intent_classification,
+                available_tools=available_tools,
+                parent_run=ask_run,
             )
 
             #读取记忆内容
@@ -113,9 +123,23 @@ class ChatService:
             # 节点5：智能体 ReAct 推理循环
             answer = ""
             state = AgentState()
-            system_prompt = self._build_base_system_prompt(context, history_prompt_text, req.query, mcp_tool_map)
+            system_prompt = self._build_base_system_prompt(context,
+                                                           history_prompt_text,
+                                                           req.query,
+                                                           mcp_tool_map,
+                                                           tool_selection
+                                                           )
             logger.info("[%s] Agent loop start", request_id)
-            answer = self._run_agent_loop(req.query,system_prompt,available_tools, SKILL_MAP, mcp_tool_map, state, parent_run=ask_run)
+            #根据工具选择结果重排序工具
+            if tool_selection and tool_selection.tool_name:
+                # 将已选择的工具放在列表开头
+                preferred_tools = next((t for t in available_tools if t.get("name") == tool_selection.tool_name), None)
+                if preferred_tools:
+                    available_tools.remove(preferred_tools)
+                    available_tools.insert(0, preferred_tools)
+                    logger.info("[%s] Preferred tool '%s' moved to the front of available tools", request_id, tool_selection.tool_name)
+
+            answer = self._run_agent_loop(req.query,system_prompt,available_tools, SKILL_MAP, mcp_tool_map, state, tool_selection, parent_run=ask_run)
             tool_error_count = state.tool_error_count
             logger.info(
                 "[%s] Agent loop finished: answer_len=%d tool_error_count=%d",
@@ -184,6 +208,10 @@ class ChatService:
                 intent=intent_classification.intent,
                 intent_confidence=intent_classification.confidence,
                 trace_id=trace_id,
+                selected_tool=None if not tool_selection else tool_selection.tool_name,
+                tool_confidence=None if not tool_selection else tool_selection.confidence,
+                fallback_tool=[] if not tool_selection else tool_selection.fallback_tools,
+                tool_selection_reason=None if not tool_selection else tool_selection.reasoning,
             )
             # 新增：在响应中添加追踪信息
             self.trace.end_run(
@@ -206,6 +234,10 @@ class ChatService:
                     intent=intent_classification.intent,
                     intent_confidence=intent_classification.confidence,
                     trace_id=trace_id,
+                    selected_tool=None if not tool_selection else tool_selection.tool_name,
+                    tool_confidence=None if not tool_selection else tool_selection.confidence,
+                    fallback_tool=[] if not tool_selection else tool_selection.fallback_tools,
+                    tool_selection_reason=None if not tool_selection else tool_selection.reasoning,
                 )
 
         except Exception as e:
@@ -335,11 +367,11 @@ class ChatService:
             )
             parsed = _safe_parse_intent_json(str(result or "{}"))
             intent_classification = IntentClassification(
-                intent=parsed.get("intent", "unknown"), # type: ignore
-                confidence=float(parsed.get("confidence", 0.0)), # type: ignore
-                category=parsed.get("category", "other"),# type: ignore
-                entities=parsed.get("entities", {}),# type: ignore
-                reasoning=parsed.get("reasoning", ""),# type: ignore
+                intent=cast(str, parsed.get("intent", "unknown")),
+                confidence=float(cast(str | float, parsed.get("confidence", 0.0))),
+                category=cast(str, parsed.get("category", "other")),
+                entities=cast(dict[str, Any] | None, parsed.get("entities", {})),
+                reasoning=cast(str, parsed.get("reasoning", "")),
             )
             # 保持原有的模块激活决策
             module_activation = {
@@ -381,13 +413,33 @@ class ChatService:
                 )
 
 
-    def _build_base_system_prompt(self, context: str, history_prompt_text: str, query: str, mcp_tool_map: dict[str, SkillFunc]) -> str:
+    def _build_base_system_prompt(self, context: str,
+                                  history_prompt_text: str, query: str,
+                                  mcp_tool_map: dict[str, SkillFunc],
+                                    tool_selection: ToolSelection | None = None
+                                  ) -> str:
         system_prompt = (
             "你是一个企业级智能体。\n"
             "请结合本地知识库指导，自主决定是否需要编写 SQL 语句查询本地数据库以获取最新的实时数据。\n"
             "如果不需要调用工具，直接给出结论。\n"
             f"知识库背景:\n{context}"
         )
+        if tool_selection and tool_selection.confidence >= 0.5:
+            system_prompt += (
+                f"\n\n【工具选择】"
+                f"\n- 已选择工具: {tool_selection.tool_name}"
+                f"\n- 置信度: {tool_selection.confidence:.2f}"
+                f"\n- 备选工具: {', '.join(tool_selection.fallback_tools) if tool_selection.fallback_tools else '无'}"
+                f"\n- 选择理由: {tool_selection.reasoning or '无'}"
+            )
+            if tool_selection.fallback_tools:
+                system_prompt += (
+                    f"\n\n【备用工具使用规则】"
+                    f"\n- 如果选择的工具调用失败或数据不足，请尝试使用以下备用工具: {', '.join(tool_selection.fallback_tools)}"
+                    f"\n- 备用工具的调用顺序可根据实际情况灵活调整。"
+                )
+
+
         if "query_mysql_database" in mcp_tool_map:
             system_prompt += (
                 f"\nMySQL 工具使用规则:\n{MYSQL_TOOL_USER_PROMPT}"
@@ -410,6 +462,7 @@ class ChatService:
             skill_map: dict[str, SkillFunc],
             mcp_tool_map: dict[str, SkillFunc],
             state: AgentState,
+            tool_selection: ToolSelection | None = None,
             parent_run: RunTree | None = None) -> str:
         answer = ""
         for iteration in range(settings.agent_max_iterations):
@@ -475,11 +528,90 @@ class ChatService:
                     error_msg = f"工具调用失败: {e}"
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
                     logger.warning("%s", error_msg)
+
+                    # V2 功能：工具失败时尝试备选工具
+                    fallback_success = False
+                    if tool_selection and tool_selection.fallback_tools and len(state.previous_tool_calls) < settings.agent_max_iterations:
+                        logger.info("Attempting fallback tools: %s", tool_selection.fallback_tools)
+                        for backup_tool in tool_selection.fallback_tools:
+                            if backup_tool not in skill_map:
+                                logger.warning("Backup tool '%s' not available", backup_tool)
+                                continue
+                            try:
+                                # 尝试用备选工具重新执行相同的参数
+                                backup_result = skill_map[backup_tool](**actual_args)
+                                backup_summary = self.tool_result_to_string(backup_result)
+                                system_prompt += f"\n\n工具调用结果 ({backup_tool} [备选]):\n{backup_summary}"
+                                logger.info("Fallback tool '%s' succeeded", backup_tool)
+                                fallback_success = True
+                                state.tool_error_count -= 1  # 备选工具成功，减少错误计数
+                                break
+                            except Exception as backup_e:
+                                logger.warning("Fallback tool '%s' also failed: %s", backup_tool, backup_e)
+                                continue
+
                     if state.tool_error_count >= settings.agent_tool_failure_threshold:
                         state.read_only_mode = True
                         logger.warning("Tool failure threshold reached, forcing summary phase")
                         break
         return answer
+
+    def _select_tool(
+        self,
+        query:str,
+        intent_classification:IntentClassification,
+        available_tools:list[dict[str, Any]],
+        parent_run:RunTree | None = None,
+        ) -> ToolSelection:
+        """
+        选择最合适的工具
+        Returns:
+            ToolSelection
+        """
+        # 将工具列表转换为字符串格式
+        tools_str = "\n".join([f"- {t.get('name')}: {t.get('description', '')}" for t in available_tools])
+        tool_selection_prompt = (
+            "你是一个企业级工具选择器。请根据用户查询和意图分类，选择最合适的工具。"
+            "如果没有合适的工具，请返回空字符串。\n"
+            "返回 JSON 格式：\n"
+            "{\n"
+            '  "tool_name": "选择的工具名称",\n'
+            '  "confidence": 0.85,\n'
+            '  "fallback_tools": ["备用工具1", "备用工具2"],\n'
+            '  "reasoning": "选择理由"\n'
+            "}\n\n"
+            f"用户意图: {intent_classification.intent}\n"
+            f"意图类型: {intent_classification.category}\n"
+            f"用户查询: {query}\n\n"
+            f"可用工具:\n{tools_str}\n\n"
+        )
+        try:
+            result = self.model_client.chat(
+                user_query=query,
+                system_prompt=tool_selection_prompt,
+                tools=[],
+                return_message=False,
+                parent_run=parent_run,
+                _token_counter=None,
+            )
+            parsed = _safe_parse_intent_json(str(result or "{}"))
+            tool_selection = ToolSelection(
+                tool_name=str(parsed.get("tool_name", "")),
+                confidence=float(parsed.get("confidence", 0.0)), # type: ignore
+                fallback_tools=cast(list[str], parsed.get("fallback_tools", [])),
+                reasoning=str(parsed.get("reasoning", "")),
+            )
+            logger.info("Tool selected: %s (confidence=%.2f)", tool_selection.tool_name, tool_selection.confidence)
+            return tool_selection
+        except Exception as e:
+            logger.warning("Tool selection failed, defaulting to no tool: %s", e)
+            first_tool_name = cast(str, available_tools[0].get("name", "unknown") if available_tools else "unknown")
+            return ToolSelection(
+                tool_name=first_tool_name,
+                confidence=0.0,
+                fallback_tools=[cast(str, t.get("name", "")) for t in available_tools[1:3]],
+                reasoning=f"Tool selection failed: {str(e)}",
+            )
 
 
 
