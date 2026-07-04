@@ -21,7 +21,10 @@ class Settings(BaseSettings):
     # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
     # ========================================================
     agent_max_iterations: int = 3  # 允许 Agent 思考与调用工具的最大轮数            # LLM 失败重试次数
-
+    task_max_retries: int = 2
+    task_initial_backoff_seconds: float = 0.5
+    task_max_workers: int = 4
+    task_timeout_seconds: int = 20
     # --- Embedding 配置 ---
     embedding_model: str = "text-embedding-v3"
     embedding_dimensions: int = 1024

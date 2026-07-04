@@ -14,6 +14,8 @@ class MessageType(str,Enum):
     # 其他消息类型可以在此处添加
     TASK_REQUEST = "task_request"
     TASK_RESPONSE = "task_response"
+    TASK_DECOMPOSITION = "task_decomposition"
+    MULTI_TASK_EXECUTION = "multi_task_execution"
 
 class MessagePriority(str,Enum):
     """消息优先级"""
@@ -100,4 +102,42 @@ class ToolSelection:
         if not (0 <= self.confidence <= 1):
             raise ValueError(f"Confidence must be between 0 and 1, got {self.confidence}")
 
+@dataclass
+class SubTask:
+    """子任务"""
+    task_id: str
+    """子任务 ID"""
+    description: str
+    """子任务描述"""
+    preferred_tool: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    priority: int = 0
+    """子任务优先级，数值越大优先级越高"""
 
+@dataclass
+class TaskDecomposition:
+    """任务分解"""
+    subtasks: list[SubTask] = field(default_factory=list)
+    """子任务列表"""
+    parallel_groups: list[list[str]] = field(default_factory=list)
+    """并行组"""
+    dependencies: dict[str, list[str]] = field(default_factory=dict)
+    """依赖关系"""
+    strategy: str = "parallel_first"
+
+@dataclass
+class ParallelTaskResult:
+    completed_tasks:int
+    """已完成的任务数"""
+    failed_tasks:int
+    """失败的任务数"""
+    total_tasks:int
+    """总任务数"""
+    total_time:float
+    """总耗时"""
+    tools_used:list[str] = field(default_factory=list)
+    """使用的工具列表"""
+    task_outputs:dict[str, str] = field(default_factory=dict)
+    """任务输出"""
+    failed_task_ids:list[str] = field(default_factory=list)
+    """失败的任务 ID 列表"""

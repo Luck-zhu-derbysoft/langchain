@@ -34,3 +34,16 @@ class ChatResponse(BaseModel):
 	tool_confidence: Optional[float] = Field(default=None, description="选择工具的置信度")
 	fallback_tool:list[str] = Field(default=[], description="备选工具列表")
 	tool_selection_reason: Optional[str] = Field(default=None, description="选择工具的原因")
+	task_decomposed: bool = Field(default=False, description="是否进行了任务拆分")
+	is_multi_task: bool = Field(default=False, description="是否进入多任务执行模式")
+	multi_task_results: Optional[dict] = Field(default=None, description="多任务执行统计结果")
+	failed_tasks: list[str] = Field(default_factory=list, description="失败的子任务ID列表")
+	manual_intervention_required: bool = Field(default=False, description="是否需要人工介入")
+	retry_count: int = Field(default=0, description="重试次数")
+	fallback_used: bool = Field(default=False, description="是否使用了备用策略")
+	fallback_strategy: str = Field(default="", description="备用策略名称")
+
+
+
+
+

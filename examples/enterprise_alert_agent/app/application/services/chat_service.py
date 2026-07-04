@@ -1,13 +1,16 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 import json
 import logging
+import re
+import time
 import uuid
 from typing import Any, Callable, Dict, TypedDict, cast
 
 from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
-from app.infrastructure.agent.a2a_protocol import IntentClassification, ToolSelection
+from app.infrastructure.agent.a2a_protocol import IntentClassification, ParallelTaskResult, SubTask, TaskDecomposition, ToolSelection
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
 from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
@@ -20,6 +23,7 @@ from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
 from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta, TIME_SKILL_MAP
 from app.tool.static import _safe_parse_intent_json, _to_bool
+from threading import Lock
 
 
 
@@ -35,6 +39,14 @@ class AgentState:
     previous_tool_calls: set[str] = field(default_factory=set)
     read_only_mode: bool =False
     tool_error_count: int = 0
+    "任务分解结果"
+    task_decomposition:TaskDecomposition | None = None
+    is_multi_task: bool = False
+    parallel_task_results:ParallelTaskResult | None = None
+    failed_task_ids: list[str] = field(default_factory=list)
+    retry_count: int = 0
+    fallback_used: bool = False
+    fallback_strategy: str = ""
 
 class ToolsResolution(TypedDict):
     available: list[dict[str, Any]]
@@ -129,22 +141,43 @@ class ChatService:
                                                            mcp_tool_map,
                                                            tool_selection
                                                            )
-            logger.info("[%s] Agent loop start", request_id)
-            #根据工具选择结果重排序工具
-            if tool_selection and tool_selection.tool_name:
-                # 将已选择的工具放在列表开头
-                preferred_tools = next((t for t in available_tools if t.get("name") == tool_selection.tool_name), None)
-                if preferred_tools:
-                    available_tools.remove(preferred_tools)
-                    available_tools.insert(0, preferred_tools)
-                    logger.info("[%s] Preferred tool '%s' moved to the front of available tools", request_id, tool_selection.tool_name)
+            task_decomposition = self._decompose_task(req.query, intent_classification, parent_run=ask_run)
+            state.task_decomposition = task_decomposition
+            state.is_multi_task = len(task_decomposition.subtasks) > 1
+            if state.is_multi_task:
+                logger.info("[%s] Multi-task detected: %d subtasks", request_id, len(task_decomposition.subtasks))
+                parallel_results = self._execute_decomposed_tasks(
+                    req_query=req.query,
+                    decomposition=task_decomposition,
+                    system_prompt=system_prompt,
+                    available_tools=available_tools,
+                    skill_map=SKILL_MAP,
+                    mcp_tool_map=mcp_tool_map,
+                    tool_selection=tool_selection,
+                    state=state,
+                    parent_run=ask_run)
 
-            answer = self._run_agent_loop(req.query,system_prompt,available_tools, SKILL_MAP, mcp_tool_map, state, tool_selection, parent_run=ask_run)
-            tool_error_count = state.tool_error_count
-            logger.info(
-                "[%s] Agent loop finished: answer_len=%d tool_error_count=%d",
-                request_id, len(answer or ""), tool_error_count,
-            )
+                state.parallel_task_results = parallel_results
+                state.failed_task_ids = parallel_results.failed_task_ids
+                answer = self._merge_multi_task_results(parallel_results)
+                tool_error_count = parallel_results.failed_tasks
+            else:
+                logger.info("[%s] Single-task mode", request_id)
+                #根据工具选择结果重排序工具
+                if tool_selection and tool_selection.tool_name:
+                    # 将已选择的工具放在列表开头
+                    preferred_tools = next((t for t in available_tools if t.get("name") == tool_selection.tool_name), None)
+                    if preferred_tools:
+                        available_tools.remove(preferred_tools)
+                        available_tools.insert(0, preferred_tools)
+                        logger.info("[%s] Preferred tool '%s' moved to the front of available tools", request_id, tool_selection.tool_name)
+
+                answer = self._run_agent_loop(req.query,system_prompt,available_tools, SKILL_MAP, mcp_tool_map, state, tool_selection, parent_run=ask_run)
+                tool_error_count = state.tool_error_count
+                logger.info(
+                    "[%s] Agent loop finished: answer_len=%d tool_error_count=%d",
+                    request_id, len(answer or ""), tool_error_count,
+                )
 
             if not answer and "工具调用结果 (" in system_prompt:
                 summary_prompt = (
@@ -212,6 +245,21 @@ class ChatService:
                 tool_confidence=None if not tool_selection else tool_selection.confidence,
                 fallback_tool=[] if not tool_selection else tool_selection.fallback_tools,
                 tool_selection_reason=None if not tool_selection else tool_selection.reasoning,
+                task_decomposed= state.task_decomposition is not None,
+                is_multi_task=state.is_multi_task,
+                multi_task_results = None if not state.parallel_task_results
+                            else {
+                            "completed_tasks": state.parallel_task_results.completed_tasks,
+                            "failed_tasks": state.parallel_task_results.failed_tasks,
+                            "total_tasks": state.parallel_task_results.total_tasks,
+                            "total_time":  round(state.parallel_task_results.total_time, 3),
+                            "tools_used":state.parallel_task_results.tools_used,
+                            },
+                failed_tasks=state.failed_task_ids,
+                manual_intervention_required=False,
+                retry_count=state.retry_count,
+                fallback_used=state.fallback_used,
+                fallback_strategy=state.fallback_strategy,
             )
             # 新增：在响应中添加追踪信息
             self.trace.end_run(
@@ -238,6 +286,9 @@ class ChatService:
                     tool_confidence=None if not tool_selection else tool_selection.confidence,
                     fallback_tool=[] if not tool_selection else tool_selection.fallback_tools,
                     tool_selection_reason=None if not tool_selection else tool_selection.reasoning,
+                    retry_count=0,
+                    fallback_used=False,
+                    fallback_strategy="",
                 )
 
         except Exception as e:
@@ -504,10 +555,14 @@ class ChatService:
                         state.read_only_mode = True
                         logger.warning("Tool failure threshold reached, forcing summary phase")
                     break
+                actual_args: dict[str, Any] = {}
                 try:
-                    actual_args = tool_args
+                    actual_args = tool_args if isinstance(tool_args, dict) else {}
                     if isinstance(tool_args, str):
-                        actual_args = json.loads(tool_args)
+                        parsed_args = json.loads(tool_args)
+                        if not isinstance(parsed_args, dict):
+                            raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
+                        actual_args = parsed_args
                     if not isinstance(actual_args, dict):
                         raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
                     result = skill_map[tool_name](**actual_args)
@@ -530,7 +585,6 @@ class ChatService:
                     logger.warning("%s", error_msg)
 
                     # V2 功能：工具失败时尝试备选工具
-                    fallback_success = False
                     if tool_selection and tool_selection.fallback_tools and len(state.previous_tool_calls) < settings.agent_max_iterations:
                         logger.info("Attempting fallback tools: %s", tool_selection.fallback_tools)
                         for backup_tool in tool_selection.fallback_tools:
@@ -543,8 +597,9 @@ class ChatService:
                                 backup_summary = self.tool_result_to_string(backup_result)
                                 system_prompt += f"\n\n工具调用结果 ({backup_tool} [备选]):\n{backup_summary}"
                                 logger.info("Fallback tool '%s' succeeded", backup_tool)
-                                fallback_success = True
                                 state.tool_error_count -= 1  # 备选工具成功，减少错误计数
+                                state.fallback_used = True
+                                state.fallback_strategy = "tool_chain"
                                 break
                             except Exception as backup_e:
                                 logger.warning("Fallback tool '%s' also failed: %s", backup_tool, backup_e)
@@ -613,8 +668,245 @@ class ChatService:
                 reasoning=f"Tool selection failed: {str(e)}",
             )
 
+    @staticmethod
+    def _split_query_to_subtasks(query: str) -> list[str]:
+        """
+        将复杂查询拆分为多个子任务
+        Returns:
+            list of subtask queries
+        """
+        text = query.strip()
+        if not text:
+            return []
+        # 使用简单的分隔符拆分查询
+        if len(text) < 40 and not any(k in text for k in ["和", "以及", "同时", "并且", ",", "，", ";", "；"]):
+            return [text]
+        # 使用逗号、分号或中文分隔符拆分
+        parts = re.split(r"(?:和|以及|同时|并且|,|，|;|；)", text)
+        subtasks = [part.strip() for part in parts if part.strip()]
+        return subtasks if subtasks else [text]
+
+    def _decompose_task(self, query: str, intent_classification: IntentClassification, parent_run: RunTree | None = None) -> TaskDecomposition:
+        """
+        将复杂任务分解为多个子任务
+        Returns:
+            TaskDecomposition
+        """
+        segments = self._split_query_to_subtasks(query)
+        logger.info("Task decomposition: %d subtasks", len(segments))
+        if len(segments) <= 1:
+            return TaskDecomposition(
+                subtasks=[SubTask(task_id="task_1", description=query, priority=0)],
+                parallel_groups=[],
+                dependencies={},
+                strategy="single",
+            )
+        subtasks: list[SubTask] = []
+        dependencies: dict[str, list[str]] = {}
+        ids: list[str] = []
+        for idx, subtask_desc in enumerate(segments):
+            ids.append(f"task_{idx+1}")
+            subtasks.append(SubTask(task_id=f"task_{idx+1}", description=subtask_desc, priority=idx))
+            dependencies[f"task_{idx+1}"] = []  # 默认没有依赖关系
+        return TaskDecomposition(
+            subtasks=subtasks,
+            parallel_groups=[ids],  # 默认没有并行组
+            dependencies=dependencies,
+            strategy="parallel_first",
+        )
+
+    def _execute_decomposed_tasks(
+            self,
+            req_query: str,
+            decomposition: TaskDecomposition,
+            system_prompt: str,
+            available_tools: list[dict[str, Any]],
+            skill_map: dict[str, SkillFunc],
+            mcp_tool_map: dict[str, SkillFunc],
+            tool_selection: ToolSelection | None = None,
+            state: AgentState | None = None,
+            parent_run: RunTree | None = None
+        ) -> ParallelTaskResult:
+        """
+        执行分解后的子任务
+        Returns:
+            ParallelTaskResult
+        """
+        started = time.perf_counter()
+        tools_used: list[str] = []
+        # key=task_id, value=子任务执行结果
+        task_outputs: dict[str, str] = {}
+        failed_task_ids: list[str] = []
+        tool_lock = Lock()
+
+        def run_one_task(subtask: SubTask) -> tuple[str, bool, str, int, bool]:
+            """执行单个子任务并返回执行结果。"""
+            logger.info("Executing subtask %s: %s", subtask.task_id, subtask.description)
+
+            used_fallback = False
+            task_started = time.perf_counter()
+            task_result: tuple[str, bool, str, int, bool] = (
+                subtask.task_id,
+                False,
+                "subtask_failed",
+                0,
+                False,
+            )
+
+            for attempt in range(settings.task_max_retries):
+                if time.perf_counter() - task_started > settings.task_timeout_seconds:
+                    logger.warning("Subtask %s timed out after %d seconds", subtask.task_id, settings.task_timeout_seconds)
+                    task_result = (subtask.task_id, False, "subtask_timeout", attempt, used_fallback)
+                local_agent = AgentState()
+                try:
+                    local_answer = self._run_agent_loop(
+                        query=subtask.description,
+                        system_prompt=system_prompt,
+                        available_tools=available_tools,
+                        skill_map=skill_map,
+                        mcp_tool_map=mcp_tool_map,
+                        state=local_agent,
+                        tool_selection=tool_selection,
+                        parent_run=parent_run,
+                    ).strip()
+                    retry_times = attempt
+                    if not local_answer:
+                        logger.warning("Subtask %s returned empty answer", subtask.task_id)
+                        raise RuntimeError("empty_subtask_answer")
+
+                    if tool_selection and tool_selection.tool_name:
+                        with tool_lock:
+                            tools_used.append(tool_selection.tool_name)
+
+                    task_result = (subtask.task_id, True, local_answer, retry_times, used_fallback)
+                    break
+                except Exception as e:
+                    last_error = str(e)
+                    retry_times = attempt + 1
+                    logger.warning("Subtask %s attempt %d failed: %s", subtask.task_id, attempt + 1, e)
+                    backup_success = False
+
+                    if tool_selection and tool_selection.fallback_tools:
+                        logger.info("Subtask %s will attempt fallback tools", subtask.task_id)
+                        for backup_tool in tool_selection.fallback_tools:
+                            if backup_tool not in skill_map:
+                                logger.warning(
+                                    "Fallback tool '%s' not available for subtask %s",
+                                    backup_tool,
+                                    subtask.task_id,
+                                )
+                                continue
+                            try:
+                                backup_result = self._call_tool_with_query(skill_map[backup_tool], subtask.description)
+                                backup_summary = self.tool_result_to_string(backup_result)
+                                logger.info(
+                                    "Fallback tool '%s' succeeded for subtask %s",
+                                    backup_tool,
+                                    subtask.task_id,
+                                )
+                                with tool_lock:
+                                    tools_used.append(backup_tool)
+                                used_fallback = True
+                                backup_success = True
+                                task_result = (
+                                    subtask.task_id,
+                                    True,
+                                    backup_summary,
+                                    retry_times,
+                                    used_fallback,
+                                )
+                                break
+                            except Exception as backup_e:
+                                logger.warning(
+                                    "Fallback tool '%s' also failed for subtask %s: %s",
+                                    backup_tool,
+                                    subtask.task_id,
+                                    backup_e,
+                                )
+                                last_error = str(backup_e)
+                                task_result = (
+                                    subtask.task_id,
+                                    False,
+                                    last_error,
+                                    retry_times,
+                                    used_fallback,
+                                )
+
+                        if backup_success:
+                            break
+                        if not backup_success and attempt + 1 < settings.task_max_retries:
+                            backoff_time = settings.task_initial_backoff_seconds * (2 ** attempt)
+                            logger.info(
+                                "Subtask %s will retry after %.2f seconds (attempt %d/%d)",
+                                subtask.task_id,
+                                backoff_time,
+                                attempt + 1,
+                                settings.task_max_retries,
+                            )
+                            time.sleep(backoff_time)
 
 
+            _, ok, msg, rt, _ = task_result
+            if not ok:
+                logger.warning("Subtask %s failed after %d retries, last error: %s", subtask.task_id, rt, msg)
+            return task_result
 
+        max_workers = min(max(len(decomposition.subtasks), 1), settings.task_max_workers)  # 限制最大并行数为 4
+        #创建线程池执行所有子任务
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 映射关系：Future对象 → 对应子任务task_id
+            future_subtask_map = {executor.submit(run_one_task, subtask): subtask.task_id for subtask in decomposition.subtasks}
+            # 按任务完成顺序遍历已结束的Future（先跑完先处理，不阻塞等待全部完成）
+            for future in as_completed(future_subtask_map):
+                task_id = future_subtask_map[future]
+                try:
+                    tid,success,out, retry_times, used_fallback = future.result()
+                    if success:
+                        task_outputs[tid] = out
+                        logger.info("Subtask %s completed successfully (retries=%d, used_fallback=%s)", tid, retry_times, used_fallback)
+                    else:
+                        logger.warning("Subtask %s failed after %d retries, last error: %s", tid, retry_times, out)
+                        failed_task_ids.append(tid)
+                    if state is not None:
+                        state.retry_count += retry_times
+                        if used_fallback:
+                            state.fallback_used = True
+                            state.fallback_strategy = "tool_chain"
 
+                except Exception as e:
+                    failed_task_ids.append(task_id)
+                    logger.warning("Subtask %s raised an exception: %s", task_id, e)
+        total_tasks = len(decomposition.subtasks)
+        completed_tasks = total_tasks - len(failed_task_ids)
+        failed_tasks = len(failed_task_ids)
+        elapsed = time.perf_counter() - started
+        return ParallelTaskResult(
+            completed_tasks=completed_tasks,
+            failed_tasks=failed_tasks,
+            total_tasks=total_tasks,
+            total_time=elapsed,
+            tools_used=sorted(set(tools_used)),
+            task_outputs=task_outputs,
+            failed_task_ids=failed_task_ids,
+        )
+
+    @staticmethod
+    def _merge_multi_task_results(task_result: ParallelTaskResult) -> str:
+        if not task_result.task_outputs:
+            return "多任务执行未返回有效结果，请稍后重试。"
+        lines: list[str] = []
+        for task_id in sorted(task_result.task_outputs.keys()):
+            lines.append(f"[{task_id}] {task_result.task_outputs[task_id]}")
+        if task_result.failed_task_ids:
+            lines.append(f"以下子任务失败: {', '.join(task_result.failed_task_ids)}")
+        return "\n".join(lines)
+    @staticmethod
+    def _call_tool_with_query(tool_fn:SkillFunc,query:str) -> dict[str,Any]:
+        try:
+            return cast(dict[str,Any],tool_fn(query=query))
+        except TypeError:
+            try:
+                return cast(dict[str,Any],tool_fn(input=query))
+            except TypeError:
+                return cast(dict[str,Any],tool_fn(text=query))
 
