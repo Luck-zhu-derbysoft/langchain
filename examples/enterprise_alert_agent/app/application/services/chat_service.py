@@ -10,7 +10,9 @@ from typing import Any, Callable, Dict, TypedDict, cast
 from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
-from app.infrastructure.agent.a2a_protocol import IntentClassification, ParallelTaskResult, SubTask, TaskDecomposition, ToolSelection
+from app.infrastructure.agent.a2a_protocol import AgentTaskExecutionRequest, AgentTaskExecutionResult, IntentClassification, ParallelTaskResult, SubTask, TaskDecomposition, ToolSelection
+from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
+from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
 from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
@@ -47,6 +49,8 @@ class AgentState:
     retry_count: int = 0
     fallback_used: bool = False
     fallback_strategy: str = ""
+    active_agent_id: str = "router_agent"
+    assigned_agent_ids: list[str] = field(default_factory=list)
 
 class ToolsResolution(TypedDict):
     available: list[dict[str, Any]]
@@ -60,12 +64,15 @@ class ChatService:
         retriever: Retriever,
         trace: LangSmithTracer,
         memory: RedisPostgresConversationMemoryStore,
+        agent_registry: AgentRegistry | None = None,
+        orchestrator:MultiAgentOrchestrator | None = None,
     ) -> None:
-        # 新增：用于显式追踪
         self.model_client = model_client
         self.retriever = retriever
         self.trace = trace
         self.memory = memory
+        self.agent_registry = agent_registry or AgentRegistry()
+        self.orchestrator = orchestrator or MultiAgentOrchestrator(self.agent_registry)
     def ask(self, req: ChatRequest, *, parent_run: RunTree | None = None) -> ChatResponse:
         ask_run = self.trace.start_child(
             parent_run=parent_run,
@@ -100,6 +107,16 @@ class ChatService:
                 available_tools=available_tools,
                 parent_run=ask_run,
             )
+            state = AgentState()
+            select_agent = self._select_agent(
+                intent_classification=intent_classification,
+                tool_selection=tool_selection,
+            )
+            state.active_agent_id = select_agent.agent_id
+            state.assigned_agent_ids.append(select_agent.agent_id)
+            logger.info("[%s] Agent selected: %s", request_id, select_agent.agent_id)
+
+
 
             #读取记忆内容
             # 节点3：加载历史记忆
@@ -134,13 +151,13 @@ class ChatService:
             # 3. 智能体 ReAct 推理循环
             # 节点5：智能体 ReAct 推理循环
             answer = ""
-            state = AgentState()
             system_prompt = self._build_base_system_prompt(context,
                                                            history_prompt_text,
                                                            req.query,
                                                            mcp_tool_map,
                                                            tool_selection
                                                            )
+            #拆分任务
             task_decomposition = self._decompose_task(req.query, intent_classification, parent_run=ask_run)
             state.task_decomposition = task_decomposition
             state.is_multi_task = len(task_decomposition.subtasks) > 1
@@ -254,12 +271,18 @@ class ChatService:
                             "total_tasks": state.parallel_task_results.total_tasks,
                             "total_time":  round(state.parallel_task_results.total_time, 3),
                             "tools_used":state.parallel_task_results.tools_used,
+                            "success_rate": round(state.parallel_task_results.completed_tasks /
+                                                  state.parallel_task_results.total_tasks, 3)
+                                                  if state.parallel_task_results.total_tasks > 0 else 0.0,
+                            "task_agent_mapping": state.parallel_task_results.task_agent_mapping
                             },
                 failed_tasks=state.failed_task_ids,
                 manual_intervention_required=False,
                 retry_count=state.retry_count,
                 fallback_used=state.fallback_used,
                 fallback_strategy=state.fallback_strategy,
+                active_agent_id=state.active_agent_id,
+                assigned_agent_ids=state.assigned_agent_ids
             )
             # 新增：在响应中添加追踪信息
             self.trace.end_run(
@@ -268,6 +291,12 @@ class ChatService:
                     "request_id": request_id,
                     "retrieved_docs": len(docs),
                     "model": settings.model_name,
+                    "is_multi_task": state.is_multi_task,
+                    "retry_count": state.retry_count,
+                    "fallback_used": state.fallback_used,
+                    "failed_tasks_count": len(state.failed_task_ids),
+                    "active_agent_id": state.active_agent_id,
+                    "assigned_agent_ids": state.assigned_agent_ids,
                 },
             )
             return resp
@@ -668,6 +697,32 @@ class ChatService:
                 reasoning=f"Tool selection failed: {str(e)}",
             )
 
+    def _select_agent(
+        self,
+        intent_classification: IntentClassification,
+        tool_selection: ToolSelection | None = None,
+    ) -> AgentDescriptor:
+        """
+        根据意图分类和工具选择结果，选择最合适的智能体
+        Returns:
+            AgentDescriptor
+        """
+        if tool_selection and tool_selection.tool_name:
+            matched_agents = self.agent_registry.find_by_tool(tool_selection.tool_name)
+            if matched_agents:
+                return matched_agents[0]
+        matched_agents = self.agent_registry.find_by_capability("intent_routing")
+        if matched_agents:
+            return matched_agents[0]
+        # 如果没有匹配的智能体，返回默认智能体
+        return AgentDescriptor(
+            agent_id="router_agent",
+            display_name="Router Agent",
+            capabilities=["intent_routing"],
+            supported_tools=[],
+            priority=0,
+        )
+
     @staticmethod
     def _split_query_to_subtasks(query: str) -> list[str]:
         """
@@ -738,47 +793,57 @@ class ChatService:
         task_outputs: dict[str, str] = {}
         failed_task_ids: list[str] = []
         tool_lock = Lock()
+        task_agent_map: dict[str, str] = {}
 
-        def run_one_task(subtask: SubTask) -> tuple[str, bool, str, int, bool]:
+        def run_one_task(subtask: SubTask) -> tuple[str, bool, str, int, bool, str]:
             """执行单个子任务并返回执行结果。"""
             logger.info("Executing subtask %s: %s", subtask.task_id, subtask.description)
 
             used_fallback = False
             task_started = time.perf_counter()
-            task_result: tuple[str, bool, str, int, bool] = (
+            selected_agent = self.orchestrator.select_agent_by_subtask(subtask)
+            subtask.assigned_agent_id = selected_agent.agent_id
+            if state is not None and subtask.assigned_agent_id not in state.assigned_agent_ids:
+                state.assigned_agent_ids.append(subtask.assigned_agent_id)
+            task_result: tuple[str, bool, str, int, bool, str] = (
                 subtask.task_id,
                 False,
                 "subtask_failed",
                 0,
                 False,
+                subtask.assigned_agent_id
             )
 
             for attempt in range(settings.task_max_retries):
                 if time.perf_counter() - task_started > settings.task_timeout_seconds:
                     logger.warning("Subtask %s timed out after %d seconds", subtask.task_id, settings.task_timeout_seconds)
-                    task_result = (subtask.task_id, False, "subtask_timeout", attempt, used_fallback)
-                local_agent = AgentState()
+                    task_result = (subtask.task_id, False, "subtask_timeout", attempt, used_fallback, subtask.assigned_agent_id)
+                    break
                 try:
-                    local_answer = self._run_agent_loop(
+                    request = AgentTaskExecutionRequest(
+                        task_id=subtask.task_id,
                         query=subtask.description,
-                        system_prompt=system_prompt,
-                        available_tools=available_tools,
-                        skill_map=skill_map,
-                        mcp_tool_map=mcp_tool_map,
-                        state=local_agent,
-                        tool_selection=tool_selection,
-                        parent_run=parent_run,
-                    ).strip()
+                        agent_id=subtask.assigned_agent_id,
+                        preferred_tool=subtask.preferred_tool,
+                        context={}
+                        )
+                    execution_result: AgentTaskExecutionResult = self.orchestrator.execute_with_callback_agent(request,
+                                                                             callback_execute= lambda query, agent_id: self._execute_agent(query, agent_id, system_prompt, available_tools, skill_map, mcp_tool_map, tool_selection, parent_run))
                     retry_times = attempt
-                    if not local_answer:
+                    if not execution_result.success:
+                            raise RuntimeError(execution_result.output or "agent_execution_failed")
+                    if not execution_result.output:
                         logger.warning("Subtask %s returned empty answer", subtask.task_id)
                         raise RuntimeError("empty_subtask_answer")
 
-                    if tool_selection and tool_selection.tool_name:
-                        with tool_lock:
-                            tools_used.append(tool_selection.tool_name)
-
-                    task_result = (subtask.task_id, True, local_answer, retry_times, used_fallback)
+                    task_result = (
+                            subtask.task_id,
+                            True,
+                            execution_result.output,
+                            retry_times,
+                            used_fallback,
+                            subtask.assigned_agent_id
+                        )
                     break
                 except Exception as e:
                     last_error = str(e)
@@ -786,7 +851,7 @@ class ChatService:
                     logger.warning("Subtask %s attempt %d failed: %s", subtask.task_id, attempt + 1, e)
                     backup_success = False
 
-                    if tool_selection and tool_selection.fallback_tools:
+                    if settings.enable_fallback_chain and tool_selection and tool_selection.fallback_tools:
                         logger.info("Subtask %s will attempt fallback tools", subtask.task_id)
                         for backup_tool in tool_selection.fallback_tools:
                             if backup_tool not in skill_map:
@@ -797,7 +862,7 @@ class ChatService:
                                 )
                                 continue
                             try:
-                                backup_result = self._call_tool_with_query(skill_map[backup_tool], subtask.description)
+                                backup_result =self._call_tool_with_query(skill_map[backup_tool], subtask.description)
                                 backup_summary = self.tool_result_to_string(backup_result)
                                 logger.info(
                                     "Fallback tool '%s' succeeded for subtask %s",
@@ -814,6 +879,7 @@ class ChatService:
                                     backup_summary,
                                     retry_times,
                                     used_fallback,
+                                    subtask.assigned_agent_id,
                                 )
                                 break
                             except Exception as backup_e:
@@ -830,6 +896,7 @@ class ChatService:
                                     last_error,
                                     retry_times,
                                     used_fallback,
+                                    subtask.assigned_agent_id,
                                 )
 
                         if backup_success:
@@ -846,9 +913,9 @@ class ChatService:
                             time.sleep(backoff_time)
 
 
-            _, ok, msg, rt, _ = task_result
+            _, ok, msg, rt, _, assigned_agent_id = task_result
             if not ok:
-                logger.warning("Subtask %s failed after %d retries, last error: %s", subtask.task_id, rt, msg)
+                logger.warning("Subtask %s failed after %d retries, last error: %s ", subtask.task_id, rt, msg)
             return task_result
 
         max_workers = min(max(len(decomposition.subtasks), 1), settings.task_max_workers)  # 限制最大并行数为 4
@@ -860,12 +927,13 @@ class ChatService:
             for future in as_completed(future_subtask_map):
                 task_id = future_subtask_map[future]
                 try:
-                    tid,success,out, retry_times, used_fallback = future.result()
+                    tid,success,out, retry_times, used_fallback, agent_id = future.result()
+                    task_agent_map[tid] = agent_id
                     if success:
                         task_outputs[tid] = out
-                        logger.info("Subtask %s completed successfully (retries=%d, used_fallback=%s)", tid, retry_times, used_fallback)
+                        logger.info("Subtask %s completed successfully (retries=%d, used_fallback=%s, assigned_agent=%s)", tid, retry_times, used_fallback, agent_id)
                     else:
-                        logger.warning("Subtask %s failed after %d retries, last error: %s", tid, retry_times, out)
+                        logger.warning("Subtask %s failed after %d retries, last error: %s (assigned_agent=%s)", tid, retry_times, out, agent_id)
                         failed_task_ids.append(tid)
                     if state is not None:
                         state.retry_count += retry_times
@@ -875,7 +943,7 @@ class ChatService:
 
                 except Exception as e:
                     failed_task_ids.append(task_id)
-                    logger.warning("Subtask %s raised an exception: %s", task_id, e)
+                    logger.warning("Subtask %s raised an exception: %s ", task_id, e)
         total_tasks = len(decomposition.subtasks)
         completed_tasks = total_tasks - len(failed_task_ids)
         failed_tasks = len(failed_task_ids)
@@ -888,6 +956,7 @@ class ChatService:
             tools_used=sorted(set(tools_used)),
             task_outputs=task_outputs,
             failed_task_ids=failed_task_ids,
+            task_agent_mapping=task_agent_map
         )
 
     @staticmethod
@@ -909,4 +978,28 @@ class ChatService:
                 return cast(dict[str,Any],tool_fn(input=query))
             except TypeError:
                 return cast(dict[str,Any],tool_fn(text=query))
+
+    def _execute_agent(
+            self,
+            query: str,
+            agent_id: str,
+            system_prompt: str,
+            available_tools: list[dict[str, Any]],
+            skill_map: dict[str, SkillFunc],
+            mcp_tool_map: dict[str, SkillFunc],
+            tool_selection: ToolSelection | None = None,
+            parent_run: RunTree | None = None
+        )->str:
+        local_state = AgentState(active_agent_id=agent_id)
+        return self._run_agent_loop(
+            query=query,
+            system_prompt=system_prompt,
+            available_tools=available_tools,
+            skill_map=skill_map,
+            mcp_tool_map=mcp_tool_map,
+            state=local_state,
+            tool_selection=tool_selection,
+            parent_run=parent_run
+        )
+
 

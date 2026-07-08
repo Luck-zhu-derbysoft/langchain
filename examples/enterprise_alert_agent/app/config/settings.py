@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     task_initial_backoff_seconds: float = 0.5
     task_max_workers: int = 4
     task_timeout_seconds: int = 20
+    enable_fallback_chain: bool = True
     # --- Embedding 配置 ---
     embedding_model: str = "text-embedding-v3"
     embedding_dimensions: int = 1024

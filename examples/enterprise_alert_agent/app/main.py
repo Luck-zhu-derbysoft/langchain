@@ -3,6 +3,13 @@ import logging
 import sys
 from pathlib import Path
 
+from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
+from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
+from app.infrastructure.embedding.embedding_client import EmbeddingClient
+from app.infrastructure.memory.redis_postgres_conversation_memory import RedisPostgresConversationMemoryStore
+from app.infrastructure.vectorstore.chroma_store import ChromaStore
+from app.rag.retrieval.retriever import Retriever
+
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -37,6 +44,68 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(ingest_router)
     app.state.limiter = limiter
+
+    trace = LangSmithTracer(
+        client=get_langsmith_client(),
+        _enabled=is_langsmith_enabled(),
+        project_name=settings.langsmith_project,
+        service_name="enterprise-alert-agent",
+    )
+    embedding_client= EmbeddingClient(tracer=trace)
+    chroma_store= ChromaStore(embedding_client=embedding_client, tracer=trace)
+    memory = RedisPostgresConversationMemoryStore()
+    retriever = Retriever(chroma_store=chroma_store,tracer=trace)
+    model_client = ModelClient(tracer=trace)
+    trace = trace
+    agent_registry = AgentRegistry()
+    agent_registry.register_agent(
+        AgentDescriptor(
+            agent_id="router_agent",
+            display_name="Router Agent",
+            capabilities=["intent_routing", "tool_selection"],
+            supported_tools=[],
+            priority=100,
+        )
+    )
+    agent_registry.register_agent(
+        AgentDescriptor(
+            agent_id="rag_agent",
+            display_name="RAG Agent",
+            capabilities=["knowledge_retrieval", "summary_generation"],
+            supported_tools=[],
+            priority=80,
+        )
+    )
+    agent_registry.register_agent(
+        AgentDescriptor(
+            agent_id="sql_agent",
+            display_name="SQL Agent",
+            capabilities=["database_query"],
+            supported_tools=["query_mysql_database"],
+            priority=90,
+        )
+    )
+    agent_registry.register_agent(
+        AgentDescriptor(
+            agent_id="time_agent",
+            display_name="Time Agent",
+            capabilities=["time_query"],
+            supported_tools=["get_current_datetime"],
+            priority=95,
+        )
+    )
+
+    orchestrator = MultiAgentOrchestrator(agent_registry)
+    app.state.shared_dependencies = {
+        "embedding_client": embedding_client,
+        "chroma_store": chroma_store,
+        "memory": memory,
+        "retriever": retriever,
+        "model_client": model_client,
+        "trace": trace,
+        "agent_registry": agent_registry,
+        "orchestrator": orchestrator,
+    }
 
     # 静态文件和首页
     static_dir = Path(__file__).parent / "static"

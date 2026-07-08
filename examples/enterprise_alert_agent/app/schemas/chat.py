@@ -42,6 +42,8 @@ class ChatResponse(BaseModel):
 	retry_count: int = Field(default=0, description="重试次数")
 	fallback_used: bool = Field(default=False, description="是否使用了备用策略")
 	fallback_strategy: str = Field(default="", description="备用策略名称")
+	active_agent_id: Optional[str] = Field(default=None, description="当前处理请求的主Agent")
+	assigned_agent_ids: list[str] = Field(default_factory=list, description="分配的Agent ID列表")
 
 
 

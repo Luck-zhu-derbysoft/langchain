@@ -111,8 +111,10 @@ class SubTask:
     """子任务描述"""
     preferred_tool: str = ""
     depends_on: list[str] = field(default_factory=list)
-    priority: int = 0
     """子任务优先级，数值越大优先级越高"""
+    priority: int = 0
+    """分配的智能体 ID"""
+    assigned_agent_id: str = ""
 
 @dataclass
 class TaskDecomposition:
@@ -141,3 +143,23 @@ class ParallelTaskResult:
     """任务输出"""
     failed_task_ids:list[str] = field(default_factory=list)
     """失败的任务 ID 列表"""
+    task_agent_mapping:dict[str, str] = field(default_factory=dict)
+    """任务与智能体的映射"""
+
+@dataclass
+class AgentTaskExecutionRequest:
+    task_id: str
+    query: str
+    agent_id: str
+    preferred_tool: str = ""
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentTaskExecutionResult:
+    task_id: str
+    agent_id: str
+    success: bool
+    output: str
+    error_type: str = ""
+    latency_ms: float = 0.0
