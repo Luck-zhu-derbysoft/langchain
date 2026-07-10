@@ -145,6 +145,12 @@ class ParallelTaskResult:
     """失败的任务 ID 列表"""
     task_agent_mapping:dict[str, str] = field(default_factory=dict)
     """任务与智能体的映射"""
+    task_status_mapping:dict[str, str] = field(default_factory=dict)
+    """任务状态映射"""
+    execute_batches:list[list[str]] = field(default_factory=list)
+    """执行批次"""
+    skipped_task_ids:list[str] = field(default_factory=list)
+    """被跳过的任务 ID 列表"""
 
 @dataclass
 class AgentTaskExecutionRequest:

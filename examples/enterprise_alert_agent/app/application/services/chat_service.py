@@ -274,7 +274,10 @@ class ChatService:
                             "success_rate": round(state.parallel_task_results.completed_tasks /
                                                   state.parallel_task_results.total_tasks, 3)
                                                   if state.parallel_task_results.total_tasks > 0 else 0.0,
-                            "task_agent_mapping": state.parallel_task_results.task_agent_mapping
+                            "task_agent_mapping": state.parallel_task_results.task_agent_mapping,
+                            "task_status_mapping": state.parallel_task_results.task_status_mapping,
+                            "execution_batches": state.parallel_task_results.execute_batches,
+                            "skipped_task_ids": state.parallel_task_results.skipped_task_ids,
                             },
                 failed_tasks=state.failed_task_ids,
                 manual_intervention_required=False,
@@ -759,15 +762,26 @@ class ChatService:
         subtasks: list[SubTask] = []
         dependencies: dict[str, list[str]] = {}
         ids: list[str] = []
+        sequential_keywords = ["然后", "接着", "之后", "最后", "依次", "先", "再", "接下来", "下一步"]
+        has_sequential_dependency = any(keyword in query for keyword in sequential_keywords)
         for idx, subtask_desc in enumerate(segments):
-            ids.append(f"task_{idx+1}")
-            subtasks.append(SubTask(task_id=f"task_{idx+1}", description=subtask_desc, priority=idx))
-            dependencies[f"task_{idx+1}"] = []  # 默认没有依赖关系
+            task_id= f"task_{idx+1}"
+            ids.append(task_id)
+            depends_on = [f"task_{idx}"] if has_sequential_dependency and idx > 0 else []
+            subtasks.append(SubTask(task_id=task_id, description=subtask_desc, priority=len(segments) - idx, depends_on=depends_on))
+            # dependencies = {
+            #     "task_1": [],
+            #     "task_2": ["task_1"],
+            #     "task_3": ["task_2"]
+            # }
+            dependencies[task_id] = depends_on
+            # parallel_groups = [["task_1", "task_2", "task_3"]] or [["task_1"], ["task_2"],["task_3"]]]
+        parallel_groups = [[task_id] for task_id in ids] if  has_sequential_dependency else [ids]
         return TaskDecomposition(
             subtasks=subtasks,
-            parallel_groups=[ids],  # 默认没有并行组
+            parallel_groups=parallel_groups,
             dependencies=dependencies,
-            strategy="parallel_first",
+            strategy="parallel_first" if not has_sequential_dependency else "dependency_aware",
         )
 
     def _execute_decomposed_tasks(
@@ -793,6 +807,7 @@ class ChatService:
         task_outputs: dict[str, str] = {}
         failed_task_ids: list[str] = []
         tool_lock = Lock()
+        assigned_agent_lock = Lock()
         task_agent_map: dict[str, str] = {}
 
         def run_one_task(subtask: SubTask) -> tuple[str, bool, str, int, bool, str]:
@@ -803,8 +818,10 @@ class ChatService:
             task_started = time.perf_counter()
             selected_agent = self.orchestrator.select_agent_by_subtask(subtask)
             subtask.assigned_agent_id = selected_agent.agent_id
-            if state is not None and subtask.assigned_agent_id not in state.assigned_agent_ids:
-                state.assigned_agent_ids.append(subtask.assigned_agent_id)
+            if state is not None:
+                with assigned_agent_lock:
+                    if subtask.assigned_agent_id not in state.assigned_agent_ids:
+                        state.assigned_agent_ids.append(subtask.assigned_agent_id)
             task_result: tuple[str, bool, str, int, bool, str] = (
                 subtask.task_id,
                 False,
@@ -850,6 +867,14 @@ class ChatService:
                     retry_times = attempt + 1
                     logger.warning("Subtask %s attempt %d failed: %s", subtask.task_id, attempt + 1, e)
                     backup_success = False
+                    task_result = (
+                        subtask.task_id,
+                        False,
+                        last_error,
+                        retry_times,
+                        used_fallback,
+                        subtask.assigned_agent_id
+                    )
 
                     if settings.enable_fallback_chain and tool_selection and tool_selection.fallback_tools:
                         logger.info("Subtask %s will attempt fallback tools", subtask.task_id)
@@ -918,32 +943,55 @@ class ChatService:
                 logger.warning("Subtask %s failed after %d retries, last error: %s ", subtask.task_id, rt, msg)
             return task_result
 
-        max_workers = min(max(len(decomposition.subtasks), 1), settings.task_max_workers)  # 限制最大并行数为 4
-        #创建线程池执行所有子任务
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 映射关系：Future对象 → 对应子任务task_id
-            future_subtask_map = {executor.submit(run_one_task, subtask): subtask.task_id for subtask in decomposition.subtasks}
-            # 按任务完成顺序遍历已结束的Future（先跑完先处理，不阻塞等待全部完成）
-            for future in as_completed(future_subtask_map):
-                task_id = future_subtask_map[future]
-                try:
-                    tid,success,out, retry_times, used_fallback, agent_id = future.result()
-                    task_agent_map[tid] = agent_id
-                    if success:
-                        task_outputs[tid] = out
-                        logger.info("Subtask %s completed successfully (retries=%d, used_fallback=%s, assigned_agent=%s)", tid, retry_times, used_fallback, agent_id)
-                    else:
-                        logger.warning("Subtask %s failed after %d retries, last error: %s (assigned_agent=%s)", tid, retry_times, out, agent_id)
-                        failed_task_ids.append(tid)
-                    if state is not None:
-                        state.retry_count += retry_times
-                        if used_fallback:
-                            state.fallback_used = True
-                            state.fallback_strategy = "tool_chain"
+        task_status_map = {subtask.task_id: "queued" for subtask in decomposition.subtasks}
+        batches: list[list[SubTask]] = self._build_dependency_batches(decomposition)
 
-                except Exception as e:
-                    failed_task_ids.append(task_id)
-                    logger.warning("Subtask %s raised an exception: %s ", task_id, e)
+        for batch in batches:
+            runnable_subtasks: list[SubTask] = []
+            for subtask in batch:
+                deps = decomposition.dependencies.get(subtask.task_id, subtask.depends_on)
+                failed_deps = [dep for dep in deps if task_status_map.get(dep) != "success"]
+                if failed_deps:
+                    logger.warning("Subtask %s skipped due to failed dependencies: %s", subtask.task_id, failed_deps)
+                    task_status_map[subtask.task_id] = "skipped"
+                    failed_task_ids.append(subtask.task_id)
+                    continue
+                runnable_subtasks.append(subtask)
+            if not runnable_subtasks:
+                logger.info("No runnable subtasks in this batch, moving to next batch")
+                continue
+
+            max_workers = min(max(len(decomposition.subtasks), 1), settings.task_max_workers)  # 限制最大并行数为 4
+            #创建线程池执行所有子任务
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 映射关系：Future对象 → 对应子任务task_id
+                for subtask in runnable_subtasks:
+                    task_status_map[subtask.task_id] = "running"
+                future_subtask_map = {executor.submit(run_one_task, subtask): subtask.task_id for subtask in runnable_subtasks}
+                # 按任务完成顺序遍历已结束的Future（先跑完先处理，不阻塞等待全部完成）
+                for future in as_completed(future_subtask_map):
+                    task_id = future_subtask_map[future]
+                    try:
+                        tid,success,out, retry_times, used_fallback, agent_id = future.result()
+                        task_agent_map[tid] = agent_id
+                        if success:
+                            task_status_map[tid] = "success"
+                            task_outputs[tid] = out
+                            logger.info("Subtask %s completed successfully (retries=%d, used_fallback=%s, assigned_agent=%s)", tid, retry_times, used_fallback, agent_id)
+                        else:
+                            task_status_map[tid] = "failed"
+                            failed_task_ids.append(tid)
+                            logger.warning("Subtask %s failed after %d retries, last error: %s (assigned_agent=%s)", tid, retry_times, out, agent_id)
+                        if state is not None:
+                            state.retry_count += retry_times
+                            if used_fallback:
+                                state.fallback_used = True
+                                state.fallback_strategy = "tool_chain"
+                    except Exception as e:
+                        task_status_map[task_id] = "failed"
+                        failed_task_ids.append(task_id)
+                        assigned_agent= task_agent_map.get(task_id, "unknown")
+                        logger.warning("Subtask %s raised an exception: %s (assigned_agent=%s)", task_id, e, assigned_agent)
         total_tasks = len(decomposition.subtasks)
         completed_tasks = total_tasks - len(failed_task_ids)
         failed_tasks = len(failed_task_ids)
@@ -1001,5 +1049,45 @@ class ChatService:
             tool_selection=tool_selection,
             parent_run=parent_run
         )
+    @staticmethod
+    def _build_dependency_batches(decomposition: TaskDecomposition) -> list[list[SubTask]]:
+                # 示例 1：串行模式 has_sequential_order=True，segments 3 条
+        # plaintext
+        # ids = ["task_1", "task_2", "task_3"]
+        # dependencies = {
+        #     "task_1": [],
+        #     "task_2": ["task_1"],
+        #     "task_3": ["task_2"]
+        # }
+        # parallel_groups = [["task_1"], ["task_2"], ["task_3"]]
+        # strategy = "dependency_aware"
+        # 执行流程：task1 完成 → 再执行 task2 → 再执行 task3
+        # 示例 2：并行模式 has_sequential_order=False，segments 3 条
+        # plaintext
+        # ids = ["task_1", "task_2", "task_3"]
+        # dependencies = {
+        #     "task_1": [],
+        #     "task_2": [],
+        #     "task_3": []
+        # }
+        # parallel_groups = [["task_1", "task_2", "task_3"]]
+        # strategy = "parallel_first"
+        # 执行流程：三个任务同时并发运行，互不等待
+        # [[A,B], [C], [D]]
+        subtask_id_map: dict[str, SubTask] = {subtask.task_id: subtask for subtask in decomposition.subtasks}
+        depend_map: dict[str, set[str]] = {subtask.task_id: set(decomposition.dependencies.get(subtask.task_id, subtask.depends_on)) for subtask in decomposition.subtasks}
+        # 计算每个子任务的依赖数量
+        batches: list[list[SubTask]] = []
+        resolve:set[str] = set()
+        while len(resolve)<len(subtask_id_map):
+            # 找出所有依赖已解决的子任务
+            ready_ids = [task_id for task_id, deps in depend_map.items() if task_id not in resolve and deps.issubset(resolve)]
+            if not ready_ids:
+                unresolved = sorted(set(subtask_id_map.keys()) - resolve)
+                raise ValueError(f"Task dependency cycle detected among: {unresolved}")
+            batch = [subtask_id_map[task_id] for task_id in ready_ids]
+            batches.append(batch)
+            resolve.update(ready_ids)
+        return batches
 
 
