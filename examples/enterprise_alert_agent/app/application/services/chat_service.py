@@ -817,6 +817,8 @@ class ChatService:
             used_fallback = False
             task_started = time.perf_counter()
             selected_agent = self.orchestrator.select_agent_by_subtask(subtask)
+            if not self.orchestrator.registry.is_healthy(selected_agent.agent_id):
+                logger.warning("Selected agent %s is not healthy, falling back to default agent", selected_agent.agent_id)
             subtask.assigned_agent_id = selected_agent.agent_id
             if state is not None:
                 with assigned_agent_lock:
@@ -1004,7 +1006,10 @@ class ChatService:
             tools_used=sorted(set(tools_used)),
             task_outputs=task_outputs,
             failed_task_ids=failed_task_ids,
-            task_agent_mapping=task_agent_map
+            task_agent_mapping=task_agent_map,
+            task_status_mapping=task_status_map,
+            execute_batches= [[subtask.task_id for subtask in batch] for batch in batches],
+            skipped_task_ids=[task_id for task_id, status in task_status_map.items() if status == "skipped"]
         )
 
     @staticmethod

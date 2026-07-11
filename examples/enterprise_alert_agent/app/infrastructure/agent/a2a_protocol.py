@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import time
 from typing import Any, Dict, Optional
 from sqlalchemy import Enum
 import uuid
@@ -169,3 +170,17 @@ class AgentTaskExecutionResult:
     output: str
     error_type: str = ""
     latency_ms: float = 0.0
+
+@dataclass
+class AgentHealthState:
+    agent_id: str
+    consecutive_failures: int = 0
+    is_open: bool = True    # True = 熔断打开，拒绝调用
+    open_at:float = 0.0     # 熔断打开时间戳
+@dataclass
+class CircuitBreakerEvent:
+    agent_id: str
+    event: str                        # "opened" | "recovered" | "fallback_switched"
+    fallback_agent_id: str = ""
+    timestamp: float = field(default_factory=lambda: time.perf_counter())
+

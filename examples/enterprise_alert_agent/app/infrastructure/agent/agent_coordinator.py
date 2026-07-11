@@ -24,15 +24,19 @@ class MultiAgentOrchestrator:
 
     def  select_agent_by_subtask(self, subtask: SubTask) -> AgentDescriptor:
         if subtask.preferred_tool:
-            agent = self.registry.find_by_tool(subtask.preferred_tool)
-            if agent:
-                return agent[0]
-        agents = self.registry.find_by_capability("intent_routing")
-        if agents:
-            return agents[0]
-        fallback_agents = self.registry.find_by_capability("router_agent")
-        if fallback_agents:
-            return fallback_agents[0]
+            agents = self.registry.find_by_tool(subtask.preferred_tool)
+            for agent in agents:
+                if self.registry.is_healthy(agent.agent_id):
+                    return agent
+
+        router_agent = sorted(
+            self.registry.find_by_capability("intent_routing"),
+            key=lambda a: a.priority,
+            reverse=True
+        )
+        for agent in router_agent:
+            if self.registry.is_healthy(agent.agent_id):
+                return agent
         return AgentDescriptor(
             agent_id="default_agent",
             display_name="Default Agent",
@@ -48,6 +52,7 @@ class MultiAgentOrchestrator:
         try:
             output = callback_execute(request.query, request.agent_id)
             latency_ms = (time.perf_counter() - started) * 1000
+            self.registry.record_success(request.agent_id)
             return AgentTaskExecutionResult(
                 task_id=request.task_id,
                 agent_id=request.agent_id,
@@ -58,6 +63,7 @@ class MultiAgentOrchestrator:
         except Exception as e:
             output = str(e)
             latency_ms = (time.perf_counter() - started) * 1000
+            self.registry.record_failure(request.agent_id)
             return AgentTaskExecutionResult(
                 task_id=request.task_id,
                 agent_id=request.agent_id,
