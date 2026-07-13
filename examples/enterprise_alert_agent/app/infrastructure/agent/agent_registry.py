@@ -44,7 +44,7 @@ class AgentRegistry:
         state.consecutive_failures += 1
         if not state.is_open and state.consecutive_failures >= threshold:
             state.is_open = True
-            state.open_at = time.perf_counter()
+            state.opened_at = time.perf_counter()
             return True
         return False
     def record_success(self, agent_id: str) -> None:
@@ -55,7 +55,7 @@ class AgentRegistry:
         state = self._health.get(agent_id)
         if state is None or not state.is_open:
             return True
-        if time.perf_counter() - state.open_at >= recovery_seconds:
+        if time.perf_counter() - state.opened_at >= recovery_seconds:
             state.is_open = False
             state.consecutive_failures = 0
             return True

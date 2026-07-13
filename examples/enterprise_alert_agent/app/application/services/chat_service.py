@@ -817,8 +817,6 @@ class ChatService:
             used_fallback = False
             task_started = time.perf_counter()
             selected_agent = self.orchestrator.select_agent_by_subtask(subtask)
-            if not self.orchestrator.registry.is_healthy(selected_agent.agent_id):
-                logger.warning("Selected agent %s is not healthy, falling back to default agent", selected_agent.agent_id)
             subtask.assigned_agent_id = selected_agent.agent_id
             if state is not None:
                 with assigned_agent_lock:

@@ -175,8 +175,8 @@ class AgentTaskExecutionResult:
 class AgentHealthState:
     agent_id: str
     consecutive_failures: int = 0
-    is_open: bool = True    # True = 熔断打开，拒绝调用
-    open_at:float = 0.0     # 熔断打开时间戳
+    is_open: bool = False    # True = 熔断打开，拒绝调用
+    opened_at:float = 0.0     # 熔断打开时间戳
 @dataclass
 class CircuitBreakerEvent:
     agent_id: str
