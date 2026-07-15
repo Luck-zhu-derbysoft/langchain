@@ -109,7 +109,15 @@ class Settings(BaseSettings):
     mcp_path: str = "/mcp"
     mcp_api_key: str = ""
     mcp_enable_services: list[str] = ["mysql"]  # 允许被 MCP 调用的工具列表
-
+    # ========== 故障诊断配置==========
+    fault_diagnosis_enabled: bool = True
+    fault_alert_threshold: str = "high"  # "low", "medium", "high", "critical"
+    fault_recovery_auto_retry: bool = True
+    fault_recovery_wait_strategies: dict = {
+        "immediate": 0.1,
+        "wait_10s": 10.0,
+        "wait_30s": 30.0,
+    }
 
 
 settings = Settings()

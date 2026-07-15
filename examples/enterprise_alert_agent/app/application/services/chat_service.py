@@ -13,6 +13,8 @@ from app.config.settings import settings
 from app.infrastructure.agent.a2a_protocol import AgentTaskExecutionRequest, AgentTaskExecutionResult, IntentClassification, ParallelTaskResult, SubTask, TaskDecomposition, ToolSelection
 from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
+from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
+from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
 from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
@@ -73,6 +75,7 @@ class ChatService:
         self.memory = memory
         self.agent_registry = agent_registry or AgentRegistry()
         self.orchestrator = orchestrator or MultiAgentOrchestrator(self.agent_registry)
+        self.fault_analyzer = FaultAnalyzer()
     def ask(self, req: ChatRequest, *, parent_run: RunTree | None = None) -> ChatResponse:
         ask_run = self.trace.start_child(
             parent_run=parent_run,
@@ -926,16 +929,54 @@ class ChatService:
 
                         if backup_success:
                             break
-                        if not backup_success and attempt + 1 < settings.task_max_retries:
-                            backoff_time = settings.task_initial_backoff_seconds * (2 ** attempt)
+                        # if not backup_success and attempt + 1 < settings.task_max_retries:
+                        #     backoff_time = settings.task_initial_backoff_seconds * (2 ** attempt)
+                        #     logger.info(
+                        #         "Subtask %s will retry after %.2f seconds (attempt %d/%d)",
+                        #         subtask.task_id,
+                        #         backoff_time,
+                        #         attempt + 1,
+                        #         settings.task_max_retries,
+                        #     )
+                        #     time.sleep(backoff_time)
+                        fault_context = FaultContext(
+                            request_id="unknown",
+                            task_id=subtask.task_id,
+                            agent_id=subtask.assigned_agent_id,
+                            tool_name=subtask.preferred_tool or "unknown",
+                            error_message=str(e),
+                            error_type=type(e).__name__,
+                            retry_count=attempt,
+                            elapsed_time_ms=(time.perf_counter() - task_started) * 1000,
+                        )
+                        diagnosis: FaultDiagnosis = self.fault_analyzer.analyze(fault_context)
+                        if not diagnosis.retry_feasible:
+                            logger.warning(
+                                "[%s] Fault not retryable, using fallback strategy",
+                                fault_context.request_id
+                            )
+                            last_error =diagnosis.root_cause
+                            break
+                        # 按建议的重试策略延迟
+                        if diagnosis.retry_recommendation == "wait_30s":
+                            backoff_time = 30
+                        elif diagnosis.retry_recommendation == "wait_10s":
+                            backoff_time = 60
+                        elif diagnosis.retry_recommendation == "immediate":
+                            backoff_time = 1
+                        else:
+                            break  # 不再重试
+                        if attempt + 1 < settings.task_max_retries:
                             logger.info(
-                                "Subtask %s will retry after %.2f seconds (attempt %d/%d)",
+                                "Subtask %s will retry after %.2f seconds (attempt %d/%d) based on fault diagnosis",
                                 subtask.task_id,
                                 backoff_time,
                                 attempt + 1,
                                 settings.task_max_retries,
                             )
-                            time.sleep(backoff_time)
+                        time.sleep(backoff_time)
+
+
 
 
             _, ok, msg, rt, _, assigned_agent_id = task_result

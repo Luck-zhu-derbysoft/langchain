@@ -127,6 +127,15 @@ class TaskDecomposition:
     dependencies: dict[str, list[str]] = field(default_factory=dict)
     """依赖关系"""
     strategy: str = "parallel_first"
+@dataclass
+class FaultDiagnosisInfo:
+    """故障诊断信息（在响应中返回）"""
+    fault_id: str                       # 故障ID
+    fault_type: str                     # 故障类型
+    severity: str                       # 严重程度
+    root_cause: str                     # 根因分析
+    recovery_suggestions: list[str]     # 恢复建议
+    retry_feasible: bool                # 是否可重试
 
 @dataclass
 class ParallelTaskResult:
@@ -152,6 +161,8 @@ class ParallelTaskResult:
     """执行批次"""
     skipped_task_ids:list[str] = field(default_factory=list)
     """被跳过的任务 ID 列表"""
+    fault_diagnostics: dict[str, FaultDiagnosisInfo] = field(default_factory=dict)
+    """故障诊断信息映射 (task_id -> diagnosis)"""
 
 @dataclass
 class AgentTaskExecutionRequest:
@@ -184,3 +195,22 @@ class CircuitBreakerEvent:
     fallback_agent_id: str = ""
     timestamp: float = field(default_factory=lambda: time.perf_counter())
 
+@dataclass
+class ManualInterventionRequest:
+    """人工干预请求"""
+    task_id: str                    # 目标任务ID
+    intervention_type: str          # "retry", "skip", "modify_params", "abort"
+    retry_params: dict = field(default_factory=dict)  # 用于 modify_params
+    skip_reason: str = ""           # 跳过理由
+    user_id: str = ""               # 执行干预的用户ID
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+
+@dataclass
+class ManualInterventionResult:
+    """人工干预结果"""
+    intervention_id: str
+    task_id: str
+    success: bool
+    output: str = ""                # 如果重试成功，返回结果
+    error_message: str = ""         # 如果失败，返回错误
+    elapsed_time_ms: float = 0.0
