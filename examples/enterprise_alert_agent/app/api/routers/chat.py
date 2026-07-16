@@ -1,7 +1,6 @@
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-import uuid
 
 from app.application.services.chat_service import ChatService
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest
