@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 import uuid
@@ -10,6 +10,8 @@ from app.infrastructure.llm.model_client import (
     ModelAuthError,
     ModelRequestError,
 )
+from app.observability import alert_manager
+from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.schemas.chat import ChatRequest, ChatResponse, ClearRequest
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.infrastructure.memory.redis_postgres_conversation_memory import MemoryScope
@@ -17,6 +19,7 @@ from app.main import limiter
 router = APIRouter(prefix="/chat", tags=["chat"])
 # 在模块级别创建干预处理器实例
 _intervention_handler = InterventionHandler()
+_alert_manager = alert_manager.AlertManager()
 
 def _get_chat_service(request: Request) -> ChatService:
    deps = request.app.state.shared_dependencies
@@ -149,4 +152,41 @@ async def get_intervention_history(request_id: str):
     """获取该请求的所有干预历史"""
     # 返回所有对该请求进行过的干预记录
     pass
+
+@router.get("/alerts")
+async def get_alerts(
+    alert_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    limit: int = 100
+    ):
+    # 调用 alert_manager 获取告警
+    alert_type_enum = AlertTypes(alert_type) if alert_type else None
+    severity_enum = AlertSeverity(severity) if severity else None
+    alerts = _alert_manager.get_alerts(alert_type=alert_type_enum, severity=severity_enum, limit=limit)
+    return {
+        "total": len(alerts),
+        "alerts": [
+            {
+                "alert_id": alert.alert_id,
+                "type": alert.alert_type.value,
+                "severity": alert.severity.value,
+                "title": alert.title,
+                "message": alert.message,
+                "resource": alert.affected_resource,
+                "acknowledged": alert.acknowledged,
+                "timestamp": alert.timestamp.isoformat(),
+            }
+            for alert in alerts
+        ]
+    }
+@router.post("/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert(alert_id: str, acknowledged_by: str):
+    """确认告警"""
+    success = _alert_manager.acknowledge_alert(alert_id, acknowledged_by)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"告警 {alert_id} 未找到"
+        )
+    return {"success": True}
 

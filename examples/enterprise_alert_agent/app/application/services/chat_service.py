@@ -22,6 +22,7 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
     RedisPostgresConversationMemoryStore,
 )
 from app.infrastructure.skill.db.mysql_skill import MYSQL_TOOL_USER_PROMPT
+from app.observability.alert_manager import AlertManager
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
@@ -76,6 +77,7 @@ class ChatService:
         self.agent_registry = agent_registry or AgentRegistry()
         self.orchestrator = orchestrator or MultiAgentOrchestrator(self.agent_registry)
         self.fault_analyzer = FaultAnalyzer()
+        self.alert_manager = AlertManager()
     def ask(self, req: ChatRequest, *, parent_run: RunTree | None = None) -> ChatResponse:
         ask_run = self.trace.start_child(
             parent_run=parent_run,
@@ -929,16 +931,6 @@ class ChatService:
 
                         if backup_success:
                             break
-                        # if not backup_success and attempt + 1 < settings.task_max_retries:
-                        #     backoff_time = settings.task_initial_backoff_seconds * (2 ** attempt)
-                        #     logger.info(
-                        #         "Subtask %s will retry after %.2f seconds (attempt %d/%d)",
-                        #         subtask.task_id,
-                        #         backoff_time,
-                        #         attempt + 1,
-                        #         settings.task_max_retries,
-                        #     )
-                        #     time.sleep(backoff_time)
                         fault_context = FaultContext(
                             request_id="unknown",
                             task_id=subtask.task_id,
