@@ -12,6 +12,7 @@ from app.infrastructure.llm.model_client import (
 )
 from app.observability import alert_manager
 from app.observability.alert_types import AlertSeverity, AlertTypes
+from app.observability.metrics import MetricsCollector
 from app.schemas.chat import ChatRequest, ChatResponse, ClearRequest
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.infrastructure.memory.redis_postgres_conversation_memory import MemoryScope
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 # 在模块级别创建干预处理器实例
 _intervention_handler = InterventionHandler()
 _alert_manager = alert_manager.AlertManager()
+_metrics_collector = MetricsCollector()
 
 def _get_chat_service(request: Request) -> ChatService:
    deps = request.app.state.shared_dependencies
@@ -189,4 +191,26 @@ async def acknowledge_alert(alert_id: str, acknowledged_by: str):
             detail=f"告警 {alert_id} 未找到"
         )
     return {"success": True}
+@router.get("/metrics/{request_id}")
+async def get_metrics(request_id: str):
+    """获取该请求的性能指标"""
+    metrics = _metrics_collector.get_metrics(request_id)
+    if not metrics:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"请求 {request_id} 的性能指标未找到"
+        )
+    return {
+        "request_id": metrics.request_id,
+        "total_time_ms": metrics.total_time_ms,
+        "p50_latency_ms": metrics.get_p50_latency(),
+        "p95_latency_ms": metrics.get_p95_latency(),
+        "p99_latency_ms": metrics.get_p99_latency(),
+        "token_usage": metrics.token_usage,
+        "estimated_cost_usd": round(metrics.estimated_cost_usd, 4),
+        "cache_hit_rate": round(metrics.get_cache_hit_rate(), 3),
+        "success_rate": round(metrics.get_success_rate(), 3),
+        "error_count": metrics.error_count,
+        "retry_count": metrics.retry_count,
+    }
 
