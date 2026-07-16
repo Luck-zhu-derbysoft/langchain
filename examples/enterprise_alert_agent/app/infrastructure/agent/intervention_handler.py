@@ -4,7 +4,6 @@ import time
 from typing import Callable, Dict
 import uuid
 
-from httpcore import request
 
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest, ManualInterventionResult
 

@@ -5,9 +5,13 @@ from pathlib import Path
 
 from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
+from app.infrastructure.agent.intervention_handler import InterventionHandler
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
+from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.memory.redis_postgres_conversation_memory import RedisPostgresConversationMemoryStore
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
+from app.observability.alert_manager import AlertManager
+from app.observability.metrics import MetricsCollector
 from app.rag.retrieval.retriever import Retriever
 
 if __package__ in (None, ""):
@@ -35,7 +39,7 @@ def create_app() -> FastAPI:
     from app.api.routers.chat import router as chat_router
     from app.api.routers.health import router as health_router
     from app.api.routers.ingest import router as ingest_router
-
+    from app.api.routers.admin import router as admin_router
     app = FastAPI(
         title=settings.app_name,
         version="0.2.0",
@@ -43,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(chat_router)
     app.include_router(ingest_router)
+    app.include_router(admin_router)
     app.state.limiter = limiter
 
     trace = LangSmithTracer(
@@ -56,6 +61,11 @@ def create_app() -> FastAPI:
     memory = RedisPostgresConversationMemoryStore()
     retriever = Retriever(chroma_store=chroma_store,tracer=trace)
     model_client = ModelClient(tracer=trace)
+    fault_analyzer = FaultAnalyzer()
+    intervention_handler = InterventionHandler()
+    alert_manager = AlertManager()
+    metrics_collector = MetricsCollector()
+
     trace = trace
     agent_registry = AgentRegistry()
     agent_registry.register_agent(
@@ -105,6 +115,10 @@ def create_app() -> FastAPI:
         "trace": trace,
         "agent_registry": agent_registry,
         "orchestrator": orchestrator,
+        "fault_analyzer": fault_analyzer,
+        "intervention_handler": intervention_handler,
+        "alert_manager": alert_manager,
+        "metrics_collector": metrics_collector,
     }
 
     # 静态文件和首页
@@ -128,7 +142,7 @@ def create_app() -> FastAPI:
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
         app.state.mcp_ready = False
-
+        
         if not settings.dashscope_api_key.strip():
             msg = "DASHSCOPE_API_KEY is empty. /chat requests will fail with 401."
             app.state.model_check_message = msg
