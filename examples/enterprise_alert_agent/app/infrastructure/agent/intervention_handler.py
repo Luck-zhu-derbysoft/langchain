@@ -1,7 +1,7 @@
 """人工干预处理引擎"""
 import logging
 import time
-from typing import Callable, Dict
+from typing import Dict
 import uuid
 
 
@@ -12,23 +12,27 @@ logger = logging.getLogger(__name__)
 class InterventionHandler:
     """人工干预处理引擎"""
     def __init__(self)-> None:
-        self.pending_interventions:Dict[str,ManualInterventionRequest] = {}
+        self.intervention_queue: dict[str, list] = {}
+        # 添加干预历史存储
+        self.intervention_history: dict[str, list] = {}
+        self.pending_interventions:dict[str, list] = {}
         self.intervention_results:Dict[str,ManualInterventionResult] = {}
 
-    def create_intervention_request(self,tasK_id:str,reason:str,user_id:str="system")->ManualInterventionRequest:
+    def create_intervention_request(self,task_id:str,reason:str,user_id:str="system")->ManualInterventionRequest:
         """创建人工干预请求"""
         request = ManualInterventionRequest(
-            task_id=tasK_id,
+            task_id=task_id,
             intervention_type="pending",
             user_id=user_id
         )
-        self.pending_interventions[request.task_id] = request
-        logger.info(f"Created intervention request for task {tasK_id} with reason: {reason}")
+        if request.task_id not in self.pending_interventions:
+            self.pending_interventions[request.task_id] = []
+        self.pending_interventions[request.task_id].append(request)
+        logger.info(f"Created intervention request for task {task_id} with reason: {reason}")
         return request
 
     def submit_intervention(self,task_id: str,
-                                    intervention: ManualInterventionRequest,
-                                    execute_callback: Callable[[ManualInterventionRequest], str],timeout_seconds: float = 300.0) -> ManualInterventionResult:
+                                    request: ManualInterventionRequest,) -> ManualInterventionResult:
         intervention_id = f"intervention_{task_id}_{uuid.uuid4().hex[:8]}"
         started = time.perf_counter()
         """
@@ -43,9 +47,9 @@ class InterventionHandler:
 
         try:
             # 处理不同类型的干预
-            if intervention.intervention_type == "retry":
+            if request.intervention_type == "retry":
                 logger.info(f"Retrying task {task_id} with intervention {intervention_id}")
-                result = execute_callback(intervention)
+                result = self.execute_intervention(request)
                 return ManualInterventionResult(
                      intervention_id=intervention_id,
                     task_id=task_id,
@@ -53,18 +57,18 @@ class InterventionHandler:
                     output=result,
                     elapsed_time_ms=(time.perf_counter() - started) * 1000
                 )
-            elif intervention.intervention_type == "skip":
+            elif request.intervention_type == "skip":
                 logger.info(f"Skipping task {task_id} with intervention {intervention_id}")
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
                     task_id=task_id,
                     success=False,
-                    output=f"Task {task_id} skipped. Reason: {intervention.skip_reason}",
+                    output=f"Task {task_id} skipped. Reason: {request.skip_reason}",
                     elapsed_time_ms=(time.perf_counter() - started) * 1000
                 )
-            elif intervention.intervention_type == "modify_params":
+            elif request.intervention_type == "modify_params":
                 logger.info(f"Modifying parameters for task {task_id} with intervention {intervention_id}")
-                result = execute_callback(intervention)
+                result = self.execute_intervention(request)
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
                     task_id=task_id,
@@ -72,7 +76,7 @@ class InterventionHandler:
                     output=result,
                     elapsed_time_ms=(time.perf_counter() - started) * 1000
                 )
-            elif intervention.intervention_type == "abort":
+            elif request.intervention_type == "abort":
                 logger.info(f"Aborting task {task_id} with intervention {intervention_id}")
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
@@ -82,14 +86,15 @@ class InterventionHandler:
                     elapsed_time_ms=(time.perf_counter() - started) * 1000
                 )
             else:
-                logger.error(f"Unknown intervention type {intervention.intervention_type} for task {task_id}")
+                logger.error(f"Unknown intervention type {request.intervention_type} for task {task_id}")
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
                     task_id=task_id,
                     success=False,
-                    output=f"未知的干预类型: {intervention.intervention_type}",
+                    output=f"未知的干预类型: {request.intervention_type}",
                     elapsed_time_ms=(time.perf_counter() - started) * 1000
                 )
+
         except Exception as e:
             logger.exception(f"Error processing intervention for task {task_id}: {e}")
             return ManualInterventionResult(
@@ -100,12 +105,53 @@ class InterventionHandler:
                 elapsed_time_ms=(time.perf_counter() - started) * 1000
             )
         finally:
-            self.pending_interventions.pop(task_id, None)
+            if request.task_id not in self.intervention_history:
+                self.intervention_history[request.task_id] = []
+            self.intervention_history[request.task_id].append(request)
+
+            self.pending_interventions.pop(request.task_id, None)
             self.intervention_results[intervention_id] = ManualInterventionResult(
                 intervention_id=intervention_id,
-                task_id=task_id,
+                task_id=request.task_id,
                 success=False,
                 elapsed_time_ms=(time.perf_counter() - started) * 1000
             )
 
+    def get_pending_intervention(self,request_id: str)->list:
+        """获取待处理的干预请求"""
+        return self.pending_interventions.get(request_id, [])
 
+    def get_intervention_history(self,request_id: str)->list:
+        """获取干预历史"""
+        return self.intervention_history.get(request_id, [])
+    def add_pending_intervention(self,request_id:str,request:ManualInterventionRequest):
+        """添加待处理的干预请求"""
+        if request_id not in self.pending_interventions:
+            self.pending_interventions[request_id] = []
+        self.pending_interventions[request_id].append(request)
+
+    def remove_pending_intervention(self,request_id:str,request:ManualInterventionRequest):
+        """移除待处理的干预请求"""
+        if request_id in self.pending_interventions:
+            self.pending_interventions[request_id] = [iv for iv in self.pending_interventions[request_id] if iv != request]
+    def execute_intervention(self,request:ManualInterventionRequest,)-> str:
+        """执行干预请求"""
+        try:
+            # 处理不同类型的干预
+            if request.intervention_type == "retry":
+                logger.info(f"Retrying task {request.task_id} with intervention {request.intervention_type}")
+                # 执行重试逻辑
+            elif request.intervention_type == "skip":
+                logger.info(f"Skipping task {request.task_id} with intervention {request.intervention_type}")
+                # 执行跳过逻辑
+            elif request.intervention_type == "modify_params":
+                logger.info(f"Modifying parameters for task {request.task_id} with intervention {request.intervention_type}")
+                # 执行修改参数逻辑
+            elif request.intervention_type == "abort":
+                logger.info(f"Aborting task {request.task_id} with intervention {request.intervention_type}")
+                # 执行中止逻辑
+            else:
+                logger.error(f"Unknown intervention type {request.intervention_type} for task {request.task_id}")
+        except Exception as e:
+            logger.exception(f"Error executing intervention for task {request.task_id}: {e}")
+        return f"Executed intervention {request.intervention_type} for task {request.task_id}"

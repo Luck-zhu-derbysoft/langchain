@@ -3,6 +3,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.application.services.chat_service import ChatService
+from app.main import app
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest
 from app.infrastructure.agent.intervention_handler import InterventionHandler
 from app.infrastructure.llm.model_client import (
@@ -106,8 +107,13 @@ async def get_pending_intervention(request_id: str):
         "can_modify_params": true
     }
     """
-    # 这需要与 chat_service 集成，存储待处理请求
-    pass
+    pending_list = _intervention_handler.get_pending_intervention(request_id)
+    return {
+        "request_id": request_id,
+        "pending_interventions":[ p.dict() if hasattr(p,'dict') else p for p in pending_list],
+        "count": len(pending_list),
+    }
+
 @router.post("/{request_id}/intervention")
 async def submit_intervention(request_id: str, intervention:ManualInterventionRequest):
     """
@@ -132,9 +138,7 @@ async def submit_intervention(request_id: str, intervention:ManualInterventionRe
     try:
         result = _intervention_handler.submit_intervention(
             task_id=request_id,
-            intervention=intervention,
-            execute_callback=lambda iv: f"Result from task {intervention.task_id}",
-            timeout_seconds=300.0
+            request=intervention,
         )
         return {
             "intervention_id": result.intervention_id,
@@ -151,8 +155,13 @@ async def submit_intervention(request_id: str, intervention:ManualInterventionRe
 @router.get("/{request_id}/intervention-history")
 async def get_intervention_history(request_id: str):
     """获取该请求的所有干预历史"""
-    # 返回所有对该请求进行过的干预记录
-    pass
+    history = _intervention_handler.get_intervention_history(request_id)
+    return {
+        "request_id": request_id,
+        "interventions": [h.dict() if hasattr(h,'dict') else h for h in history],
+        "total": len(history)
+    }
+
 
 @router.get("/alerts")
 async def get_alerts(

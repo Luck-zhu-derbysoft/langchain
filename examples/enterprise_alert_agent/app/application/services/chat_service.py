@@ -9,12 +9,13 @@ from typing import Any, Callable, Dict, TypedDict, cast
 
 from langsmith.run_trees import RunTree
 
+from app.config.dynamic_settings import ConfigManager
 from app.config.settings import settings
 from app.infrastructure.agent.a2a_protocol import AgentTaskExecutionRequest, AgentTaskExecutionResult, IntentClassification, ParallelTaskResult, SubTask, TaskDecomposition, ToolSelection
 from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
-from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis
+from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis, FaultSeverity
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
 from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
@@ -23,7 +24,9 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
 )
 from app.infrastructure.skill.db.mysql_skill import MYSQL_TOOL_USER_PROMPT
 from app.observability.alert_manager import AlertManager
+from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.observability.langsmith_tracer import LangSmithTracer
+from app.observability.metrics import MetricsCollector
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
 from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta, TIME_SKILL_MAP
@@ -78,6 +81,11 @@ class ChatService:
         self.orchestrator = orchestrator or MultiAgentOrchestrator(self.agent_registry)
         self.fault_analyzer = FaultAnalyzer()
         self.alert_manager = AlertManager()
+        self.metrics_collector = MetricsCollector()
+        self.config_manager = ConfigManager()
+        self.max_retries = self.config_manager.get_agent_max_iterations()
+        self.task_timeout = self.config_manager.get_task_timeout()
+        self.max_parallel_tasks = self.config_manager.get_task_max_workers()
     def ask(self, req: ChatRequest, *, parent_run: RunTree | None = None) -> ChatResponse:
         ask_run = self.trace.start_child(
             parent_run=parent_run,
@@ -88,6 +96,8 @@ class ChatService:
         )
         request_id = str(uuid.uuid4())
         trace_id= request_id
+        start_time = time.perf_counter()
+        self.metrics_collector.create_metrics(request_id=request_id)
         logger.info(
             "[%s] Chat ask start: tenant=%s user=%s thread=%s query=%s",
             request_id, req.tenant_id, req.user_id, req.thread_id, str(req.query)[:200],
@@ -170,6 +180,7 @@ class ChatService:
                 logger.info("[%s] Multi-task detected: %d subtasks", request_id, len(task_decomposition.subtasks))
                 parallel_results = self._execute_decomposed_tasks(
                     req_query=req.query,
+                    request_id=request_id,
                     decomposition=task_decomposition,
                     system_prompt=system_prompt,
                     available_tools=available_tools,
@@ -194,7 +205,7 @@ class ChatService:
                         available_tools.insert(0, preferred_tools)
                         logger.info("[%s] Preferred tool '%s' moved to the front of available tools", request_id, tool_selection.tool_name)
 
-                answer = self._run_agent_loop(req.query,system_prompt,available_tools, SKILL_MAP, mcp_tool_map, state, tool_selection, parent_run=ask_run)
+                answer = self._run_agent_loop(req.query, request_id, system_prompt, available_tools, SKILL_MAP, mcp_tool_map, state, tool_selection, parent_run=ask_run)
                 tool_error_count = state.tool_error_count
                 logger.info(
                     "[%s] Agent loop finished: answer_len=%d tool_error_count=%d",
@@ -254,7 +265,20 @@ class ChatService:
                                                 parent_run=ask_run)
 
                     self.memory.save_summary(history_memory_params, summary_text)
-
+            elapsed_time = time.perf_counter() - start_time
+            self.metrics_collector.record_latency(request_id=request_id, latency_ms=elapsed_time * 1000)
+            #获取指标汇总
+            metrics = self.metrics_collector.get_metrics(request_id=request_id)
+            performance_metrics = {
+                    "total_time_ms": elapsed_time * 1000,
+                    "p50_latency_ms": metrics.get_p50_latency() if metrics else 0,
+                    "p95_latency_ms": metrics.get_p95_latency() if metrics else 0,
+                    "p99_latency_ms": metrics.get_p99_latency() if metrics else 0,
+                    "token_usage": metrics.token_usage if metrics else 0,
+                    "estimated_cost_usd": metrics.estimated_cost_usd if metrics else 0,
+                    "cache_hit_rate": metrics.get_cache_hit_rate() if metrics else 0,
+                    "success_rate": metrics.get_success_rate() if metrics else 1.0,
+            }
             resp = ChatResponse(
                 answer=answer,
                 citations=citations,
@@ -290,7 +314,8 @@ class ChatService:
                 fallback_used=state.fallback_used,
                 fallback_strategy=state.fallback_strategy,
                 active_agent_id=state.active_agent_id,
-                assigned_agent_ids=state.assigned_agent_ids
+                assigned_agent_ids=state.assigned_agent_ids,
+                performance_metrics=performance_metrics,
             )
             # 新增：在响应中添加追踪信息
             self.trace.end_run(
@@ -330,6 +355,7 @@ class ChatService:
 
         except Exception as e:
             # 在异常情况下也要结束追踪
+            self.metrics_collector.record_error(request_id=request_id)
             logger.exception("[%s] Chat ask failed: %s", request_id, e)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
             raise
@@ -545,6 +571,7 @@ class ChatService:
     def _run_agent_loop(
             self,
             query: str,
+            request_id: str,
             system_prompt: str,
             available_tools: list[dict[str, Any]],
             skill_map: dict[str, SkillFunc],
@@ -566,6 +593,12 @@ class ChatService:
                 parent_run=parent_run,
                 _token_counter=state.token_counter,
             )
+            if hasattr(response_message, "usage"):
+                self.metrics_collector.record_token_usage(
+                    request_id=request_id,
+                    tokens=response_message.usage.total_tokens,
+                )
+
             tool_calls = getattr(response_message, "tool_calls", [])
             if not tool_calls:
                 logger.info("Agent finished, no tool calls")
@@ -792,6 +825,7 @@ class ChatService:
     def _execute_decomposed_tasks(
             self,
             req_query: str,
+            request_id: str,
             decomposition: TaskDecomposition,
             system_prompt: str,
             available_tools: list[dict[str, Any]],
@@ -850,7 +884,7 @@ class ChatService:
                         context={}
                         )
                     execution_result: AgentTaskExecutionResult = self.orchestrator.execute_with_callback_agent(request,
-                                                                             callback_execute= lambda query, agent_id: self._execute_agent(query, agent_id, system_prompt, available_tools, skill_map, mcp_tool_map, tool_selection, parent_run))
+                                                                             callback_execute= lambda query, agent_id: self._execute_agent(query,request_id,agent_id, system_prompt, available_tools, skill_map, mcp_tool_map, tool_selection, parent_run))
                     retry_times = attempt
                     if not execution_result.success:
                             raise RuntimeError(execution_result.output or "agent_execution_failed")
@@ -942,6 +976,27 @@ class ChatService:
                             elapsed_time_ms=(time.perf_counter() - task_started) * 1000,
                         )
                         diagnosis: FaultDiagnosis = self.fault_analyzer.analyze(fault_context)
+                        severity_map = {
+                            FaultSeverity.LOW: AlertSeverity.INFO,
+                            FaultSeverity.MEDIUM: AlertSeverity.WARNING,
+                            FaultSeverity.HIGH: AlertSeverity.HIGH,
+                            FaultSeverity.CRITICAL: AlertSeverity.CRITICAL,
+                        }
+                        alert_severity = severity_map.get(diagnosis.severity, AlertSeverity.INFO)
+                        self.alert_manager.create_alert(
+                            alert_type=AlertTypes.FAULT_ALERT,
+                            severity=alert_severity,
+                            title=f"Fault in subtask {subtask.task_id}",
+                            message=str(diagnosis.root_cause),
+                            affected_resource=subtask.task_id,
+                            context={
+                                "agent_id": agent_id,
+                                "recovery_suggestions": diagnosis.recovery_suggestions,
+                                "can_retry": diagnosis.retry_feasible,
+                                "estimated_recovery_time": diagnosis.estimated_recovery_time,
+                            }
+                        )
+
                         if not diagnosis.retry_feasible:
                             logger.warning(
                                 "[%s] Fault not retryable, using fallback strategy",
@@ -953,7 +1008,7 @@ class ChatService:
                         if diagnosis.retry_recommendation == "wait_30s":
                             backoff_time = 30
                         elif diagnosis.retry_recommendation == "wait_10s":
-                            backoff_time = 60
+                            backoff_time = 10
                         elif diagnosis.retry_recommendation == "immediate":
                             backoff_time = 1
                         else:
@@ -1066,6 +1121,7 @@ class ChatService:
     def _execute_agent(
             self,
             query: str,
+            request_id: str,
             agent_id: str,
             system_prompt: str,
             available_tools: list[dict[str, Any]],
@@ -1077,6 +1133,7 @@ class ChatService:
         local_state = AgentState(active_agent_id=agent_id)
         return self._run_agent_loop(
             query=query,
+            request_id=request_id,
             system_prompt=system_prompt,
             available_tools=available_tools,
             skill_map=skill_map,

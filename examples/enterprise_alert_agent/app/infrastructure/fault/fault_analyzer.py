@@ -35,7 +35,7 @@ class FaultAnalyzer:
             affected_tasks=[context.task_id],
             recovery_suggestions=suggestions,
             retry_feasible=retry_feasible,
-            estimated_recovery_time_seconds=recovery_time,
+            estimated_recovery_time=recovery_time,
             retry_recommendation=retry_recommendation,
             context={
                 "agent_id": context.agent_id,

@@ -32,7 +32,7 @@ class FaultDiagnosis:
     affected_tasks: list[str]               # 受影响的任务ID列表
     recovery_suggestions: list[str]         # 恢复建议列表
     retry_feasible: bool                    # 是否可以重试
-    estimated_recovery_time_seconds: float  # 预计恢复时间
+    estimated_recovery_time: float  # 预计恢复时间
     retry_recommendation: str = ""          # 重试建议 ("immediate", "wait_30s", "skip")
     timestamp: datetime = field(default_factory=datetime.utcnow)
     context: dict = field(default_factory=dict)  # 诊断上下文

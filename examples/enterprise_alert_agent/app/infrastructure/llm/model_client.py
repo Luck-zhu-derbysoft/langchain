@@ -85,7 +85,6 @@ class ModelClient:
                     break  # 当前模型重试后仍失败，尝试下一个模型候选
             if completion is None:
                 raise ModelRequestError("Model request failed after retries and fallback attempts.")
-
             message = completion.choices[0].message
             content = message.content or ""
 

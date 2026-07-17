@@ -11,11 +11,13 @@ class AlertTypes(str, Enum):
     PERFORMANCE_ALERT = "performance_alert"  # 性能告警
     QUOTA_ALERT = "quota_alert"              # 配额告警
     CIRCUIT_BREAKER = "circuit_breaker"      # 熔断告警
+    TASK_FAILURE = "task_failure"            # 任务失败告警
 class AlertSeverity(str, Enum):
     """告警级别"""
     CRITICAL = "critical"  # 严重
     WARNING = "warning"    # 警告
     INFO = "info"          # 信息
+    HIGH = "high"          # 高
 @dataclass
 class Alert:
     """告警事件"""

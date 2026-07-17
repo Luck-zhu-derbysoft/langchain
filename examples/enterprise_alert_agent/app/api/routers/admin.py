@@ -1,16 +1,26 @@
 
 
 import datetime
+import os
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.config.dynamic_settings import _dynamic_settings
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+def require_admin_token(request: Request):
+    token = request.headers.get("X-Admin-Token")
+    expected_token = os.getenv("ADMIN_TOKEN", "default-admin-token")
+    if token != expected_token:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    return token
+
 @router.post("/config/{key}")
-async def update_config(key: str, value: any,user_id:str="system"):
+async def update_config(key: str, value: any,
+                        user_id:str="system",
+                        _admin_token:str = Depends(require_admin_token)):
     try:
         success = _dynamic_settings.set(key, value, user_id=user_id)
 
@@ -34,7 +44,7 @@ async def get_config(key: str):
         raise HTTPException(status_code=404, detail=f"Config for key '{key}' not found")
     return {"key": key, "value": value}
 @router.post("/config/{key}/reset")
-async def reset_config(key: str,user_id:str="system"):
+async def reset_config(key: str,user_id:str="system", _admin_token:str = Depends(require_admin_token)):
     try:
         success = _dynamic_settings.reset(key, user_id=user_id)
         if not success:
