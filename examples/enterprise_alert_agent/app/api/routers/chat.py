@@ -3,7 +3,6 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.application.services.chat_service import ChatService
-from app.main import app
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest
 from app.infrastructure.agent.intervention_handler import InterventionHandler
 from app.infrastructure.llm.model_client import (
