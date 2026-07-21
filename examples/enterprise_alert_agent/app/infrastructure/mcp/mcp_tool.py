@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from threading import Lock
 
 from app.config.settings import settings
 from app.infrastructure.mcp.mcp_adapt import MCPToolAdapter

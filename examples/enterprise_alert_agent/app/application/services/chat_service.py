@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from urllib import response
 import uuid
 from typing import Any, Callable, Dict, TypedDict, cast
 
@@ -14,6 +15,7 @@ from app.config.settings import settings
 from app.infrastructure.agent.a2a_protocol import AgentTaskExecutionRequest, AgentTaskExecutionResult, IntentClassification, ParallelTaskResult, SubTask, TaskDecomposition, ToolSelection
 from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
+from app.infrastructure.cache.multi_tier_cache import multi_tier_cache
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis, FaultSeverity
 from app.infrastructure.llm.model_client import ModelClient,BudgetExceededError
@@ -32,7 +34,7 @@ from app.schemas.chat import ChatRequest, ChatResponse, Citation
 from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta, TIME_SKILL_MAP
 from app.tool.static import _safe_parse_intent_json, _to_bool
 from threading import Lock
-
+from app.infrastructure.queue.dlq_handler import dead_letter_queue
 
 
 logger = logging.getLogger(__name__)
@@ -130,8 +132,11 @@ class ChatService:
             state.active_agent_id = select_agent.agent_id
             state.assigned_agent_ids.append(select_agent.agent_id)
             logger.info("[%s] Agent selected: %s", request_id, select_agent.agent_id)
-
-
+            #查询缓存数据
+            cached = multi_tier_cache.get(req.query, req.tenant_id)
+            if cached is not None:
+                logger.info("[%s] Cache hit: returning cached answer", request_id)
+                return ChatResponse(**cached) # 字典还原成Pydantic模型
 
             #读取记忆内容
             # 节点3：加载历史记忆
@@ -163,7 +168,6 @@ class ChatService:
 
                 context = "\n".join(context_lines)
                 logger.info("[%s] RAG retrieved %d docs (context_top_k applied)", request_id, len(docs))
-            # 3. 智能体 ReAct 推理循环
             # 节点5：智能体 ReAct 推理循环
             answer = ""
             system_prompt = self._build_base_system_prompt(context,
@@ -194,6 +198,10 @@ class ChatService:
                 state.failed_task_ids = parallel_results.failed_task_ids
                 answer = self._merge_multi_task_results(parallel_results)
                 tool_error_count = parallel_results.failed_tasks
+                for failed_task_id in parallel_results.failed_task_ids:
+                    dead_letter_queue.add(task_id=failed_task_id,
+                                          payload={"request_id": request_id},
+                                          failure_reason="parallel_task_execution_failed")
             else:
                 logger.info("[%s] Single-task mode", request_id)
                 #根据工具选择结果重排序工具
@@ -279,6 +287,7 @@ class ChatService:
                     "cache_hit_rate": metrics.get_cache_hit_rate() if metrics else 0,
                     "success_rate": metrics.get_success_rate() if metrics else 1.0,
             }
+
             resp = ChatResponse(
                 answer=answer,
                 citations=citations,
@@ -317,6 +326,8 @@ class ChatService:
                 assigned_agent_ids=state.assigned_agent_ids,
                 performance_metrics=performance_metrics,
             )
+            # model_dump 模型实例转换成标准 Python 字典 dict，方便序列化存入缓存、Redis、数据库
+            multi_tier_cache.set(req.query, resp.model_dump(), req.tenant_id)
             # 新增：在响应中添加追踪信息
             self.trace.end_run(
                 ask_run,
