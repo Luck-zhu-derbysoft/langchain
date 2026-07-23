@@ -4,23 +4,18 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.application.services.chat_service import ChatService
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest
-from app.infrastructure.agent.intervention_handler import InterventionHandler
 from app.infrastructure.llm.model_client import (
     ModelAuthError,
     ModelRequestError,
 )
-from app.observability import alert_manager
 from app.observability.alert_types import AlertSeverity, AlertTypes
-from app.observability.metrics import MetricsCollector
 from app.schemas.chat import ChatRequest, ChatResponse, ClearRequest
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.infrastructure.memory.redis_postgres_conversation_memory import MemoryScope
 from app.main import limiter
 router = APIRouter(prefix="/chat", tags=["chat"])
 # 在模块级别创建干预处理器实例
-_intervention_handler = InterventionHandler()
-_alert_manager = alert_manager.AlertManager()
-_metrics_collector = MetricsCollector()
+
 
 def _get_chat_service(request: Request) -> ChatService:
    deps = request.app.state.shared_dependencies
@@ -29,8 +24,11 @@ def _get_chat_service(request: Request) -> ChatService:
         retriever=deps["retriever"],
         trace=deps["trace"],
         memory=deps["memory"],
+        _intervention_handler=deps["_intervention_handler"],
+        _alert_manager=deps["_alert_manager"],
+        _metrics_collector=deps["_metrics_collector"],
         agent_registry=deps["agent_registry"],
-        orchestrator=deps["orchestrator"]
+        orchestrator=deps["orchestrator"],
     )
 @router.post("", response_model=ChatResponse)
 @limiter.limit("10/minute")
@@ -94,7 +92,7 @@ def clear_memory(request: Request, req: ClearRequest, service: Annotated[ChatSer
     return {"message": "Memory cleared for the specified thread."}
 
 @router.get("/{request_id}/pending-intervention")
-async def get_pending_intervention(request_id: str):
+async def get_pending_intervention(request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
     """
     获取正在等待用户干预的请求
 
@@ -106,7 +104,7 @@ async def get_pending_intervention(request_id: str):
         "can_modify_params": true
     }
     """
-    pending_list = _intervention_handler.get_pending_intervention(request_id)
+    pending_list = service._intervention_handler.get_pending_intervention(request_id)
     return {
         "request_id": request_id,
         "pending_interventions":[ p.dict() if hasattr(p,'dict') else p for p in pending_list],
@@ -114,7 +112,7 @@ async def get_pending_intervention(request_id: str):
     }
 
 @router.post("/{request_id}/intervention")
-async def submit_intervention(request_id: str, intervention:ManualInterventionRequest):
+async def submit_intervention(request_id: str, intervention:ManualInterventionRequest, service: Annotated[ChatService, Depends(_get_chat_service)]):
     """
     提交人工干预请求
 
@@ -135,7 +133,7 @@ async def submit_intervention(request_id: str, intervention:ManualInterventionRe
     }
     """
     try:
-        result = _intervention_handler.submit_intervention(
+        result = service._intervention_handler.submit_intervention(
             task_id=request_id,
             request=intervention,
         )
@@ -152,9 +150,9 @@ async def submit_intervention(request_id: str, intervention:ManualInterventionRe
             detail=f"处理干预请求时出错: {str(e)}"
         )
 @router.get("/{request_id}/intervention-history")
-async def get_intervention_history(request_id: str):
+async def get_intervention_history(request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
     """获取该请求的所有干预历史"""
-    history = _intervention_handler.get_intervention_history(request_id)
+    history = service._intervention_handler.get_intervention_history(request_id)
     return {
         "request_id": request_id,
         "interventions": [h.dict() if hasattr(h,'dict') else h for h in history],
@@ -164,14 +162,15 @@ async def get_intervention_history(request_id: str):
 
 @router.get("/alerts")
 async def get_alerts(
+    service: Annotated[ChatService, Depends(_get_chat_service)],
     alert_type: Optional[str] = None,
     severity: Optional[str] = None,
-    limit: int = 100
+    limit: int = 100,
     ):
     # 调用 alert_manager 获取告警
     alert_type_enum = AlertTypes(alert_type) if alert_type else None
     severity_enum = AlertSeverity(severity) if severity else None
-    alerts = _alert_manager.get_alerts(alert_type=alert_type_enum, severity=severity_enum, limit=limit)
+    alerts = service.alert_manager.get_alerts(alert_type=alert_type_enum, severity=severity_enum, limit=limit)
     return {
         "total": len(alerts),
         "alerts": [
@@ -189,9 +188,9 @@ async def get_alerts(
         ]
     }
 @router.post("/alerts/{alert_id}/acknowledge")
-async def acknowledge_alert(alert_id: str, acknowledged_by: str):
+async def acknowledge_alert(alert_id: str, acknowledged_by: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
     """确认告警"""
-    success = _alert_manager.acknowledge_alert(alert_id, acknowledged_by)
+    success = service.alert_manager.acknowledge_alert(alert_id, acknowledged_by)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -199,9 +198,9 @@ async def acknowledge_alert(alert_id: str, acknowledged_by: str):
         )
     return {"success": True}
 @router.get("/metrics/{request_id}")
-async def get_metrics(request_id: str):
+async def get_metrics(request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
     """获取该请求的性能指标"""
-    metrics = _metrics_collector.get_metrics(request_id)
+    metrics = service.metrics_collector.get_metrics(request_id)
     if not metrics:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

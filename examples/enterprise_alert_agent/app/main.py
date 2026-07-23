@@ -10,6 +10,7 @@ from app.infrastructure.embedding.embedding_client import EmbeddingClient
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.memory.redis_postgres_conversation_memory import RedisPostgresConversationMemoryStore
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
+from app.observability import alert_manager
 from app.observability.alert_manager import AlertManager
 from app.observability.metrics import MetricsCollector
 from app.rag.retrieval.retriever import Retriever
@@ -65,6 +66,9 @@ def create_app() -> FastAPI:
     intervention_handler = InterventionHandler()
     alert_manager = AlertManager()
     metrics_collector = MetricsCollector()
+    _intervention_handler = InterventionHandler()
+    _alert_manager = alert_manager.AlertManager()
+    _metrics_collector = MetricsCollector()
 
     trace = trace
     agent_registry = AgentRegistry()
@@ -119,6 +123,9 @@ def create_app() -> FastAPI:
         "intervention_handler": intervention_handler,
         "alert_manager": alert_manager,
         "metrics_collector": metrics_collector,
+        "_intervention_handler": _intervention_handler,
+        "_alert_manager": _alert_manager,
+        "_metrics_collector": _metrics_collector,
     }
 
     # 静态文件和首页
@@ -142,7 +149,7 @@ def create_app() -> FastAPI:
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
         app.state.mcp_ready = False
-        
+
         if not settings.dashscope_api_key.strip():
             msg = "DASHSCOPE_API_KEY is empty. /chat requests will fail with 401."
             app.state.model_check_message = msg

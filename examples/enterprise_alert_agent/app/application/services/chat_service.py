@@ -14,6 +14,7 @@ from app.config.settings import settings
 from app.infrastructure.agent.a2a_protocol import AgentTaskExecutionRequest, AgentTaskExecutionResult, IntentClassification, ParallelTaskResult, SubTask, TaskDecomposition, ToolSelection
 from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
+from app.infrastructure.agent.intervention_handler import InterventionHandler
 from app.infrastructure.cache.multi_tier_cache import multi_tier_cache
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis, FaultSeverity
@@ -71,6 +72,9 @@ class ChatService:
         retriever: Retriever,
         trace: LangSmithTracer,
         memory: RedisPostgresConversationMemoryStore,
+        _intervention_handler: InterventionHandler,
+        _alert_manager: AlertManager,
+        _metrics_collector: MetricsCollector,
         agent_registry: AgentRegistry | None = None,
         orchestrator:MultiAgentOrchestrator | None = None,
     ) -> None:
@@ -81,8 +85,9 @@ class ChatService:
         self.agent_registry = agent_registry or AgentRegistry()
         self.orchestrator = orchestrator or MultiAgentOrchestrator(self.agent_registry)
         self.fault_analyzer = FaultAnalyzer()
-        self.alert_manager = AlertManager()
-        self.metrics_collector = MetricsCollector()
+        self._intervention_handler = _intervention_handler
+        self.alert_manager = _alert_manager
+        self.metrics_collector = _metrics_collector
         self.config_manager = ConfigManager()
         self.max_retries = self.config_manager.get_agent_max_iterations()
         self.task_timeout = self.config_manager.get_task_timeout()
