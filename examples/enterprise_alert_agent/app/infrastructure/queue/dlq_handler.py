@@ -27,7 +27,7 @@ class DLQStatus(str, Enum):
     ABANDONED = "abandoned"
 
 @dataclass
-class DLQMEntry:
+class DLQEntry:
     """死信队列条目"""
     dlq_id: str
     task_id: str
@@ -41,16 +41,16 @@ class DLQMEntry:
 class DeadLetterQueue:
     "线程安全的死信队列处理器"
     def __init__(self,max_retries: int = 3,backoff_base_seconds: int = 1)-> None:
-        self._entries: dict[str, DLQMEntry] = {}
+        self._entries: dict[str, DLQEntry] = {}
         self.max_retries = max_retries
         self.backoff_base_seconds = backoff_base_seconds
         self._lock = threading.Lock()
 
-    def add(self, task_id: str, payload: dict[str, Any], failure_reason: str) -> DLQMEntry:
+    def add(self, task_id: str, payload: dict[str, Any], failure_reason: str) -> DLQEntry:
         """添加死信队列条目"""
         with self._lock:
             dlq_id=f"dlq_{uuid.uuid4().hex[:12]}"
-            entry = DLQMEntry(
+            entry = DLQEntry(
                 dlq_id=dlq_id,
                 task_id=task_id,
                 payload=payload,
@@ -83,7 +83,7 @@ class DeadLetterQueue:
             entry.status = DLQStatus.RESOLVED
         logger.info(f"DLQ entry resolved after retry: {entry}")
         return True
-    def list_pending(self)->list[DLQMEntry]:
+    def list_pending(self)->list[DLQEntry]:
         """列出所有待处理的死信队列条目"""
         with self._lock:
             return [entry for entry in self._entries.values() if entry.status == DLQStatus.PENDING]

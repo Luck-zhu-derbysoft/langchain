@@ -4,7 +4,6 @@ import json
 import logging
 import re
 import time
-from urllib import response
 import uuid
 from typing import Any, Callable, Dict, TypedDict, cast
 
@@ -136,7 +135,21 @@ class ChatService:
             cached = multi_tier_cache.get(req.query, req.tenant_id)
             if cached is not None:
                 logger.info("[%s] Cache hit: returning cached answer", request_id)
-                return ChatResponse(**cached) # 字典还原成Pydantic模型
+                cache_response = ChatResponse(**cached) # 字典还原成Pydantic模型
+                cache_response.request_id = request_id  # 更新 request_id
+                cache_response.trace_id = trace_id  # 更新 trace_id
+                self.metrics_collector.record_cache_hit(request_id=request_id)
+                self.trace.end_run(
+                    ask_run,
+                    outputs={
+                        "request_id": request_id,
+                        "cache_hit": True,
+                        "is_multi_task": False,
+                        "failed_task_count": 0,
+                    },
+                )
+                return cache_response
+            self.metrics_collector.record_cache_miss(request_id=request_id)
 
             #读取记忆内容
             # 节点3：加载历史记忆
