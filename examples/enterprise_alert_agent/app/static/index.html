@@ -461,8 +461,15 @@
             btn.innerHTML = '发送中<span class="loading"></span>';
             chatBox.scrollTop = chatBox.scrollHeight;
 
+            const botBubble = document.createElement('div');
+            botBubble.className = 'chat-msg bot';
+            chatBox.appendChild(botBubble);
+
+            let answerText = '';
+            let citationsHtml = '';
+
             try {
-                const res = await fetch(`${API_BASE}/chat`, {
+                const res = await fetch(`${API_BASE}/chat/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -473,22 +480,59 @@
                         user_id: scope.user_id,
                     }),
                 });
-                const data = await res.json();
 
-                if (res.ok) {
-                    let citationsHtml = '';
-                    if (data.citations && data.citations.length > 0) {
-                        citationsHtml = '<div class="citations">📎 引用来源：' +
-                            data.citations.map(c => `[${escapeHtml(c.source_id)}]`).join(' ') +
-                            '</div>';
+                if (!res.ok || !res.body) {
+                    const data = await res.json().catch(() => ({}));
+                    const errMsg = formatErrorDetail(data.detail || data || '请求失败');
+                    botBubble.innerHTML = `<span style="color:#c62828">❌ 错误：${escapeHtml(errMsg)}</span>`;
+                    return;
+                }
+
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const frames = buffer.split('\n\n');
+                    buffer = frames.pop() || '';
+
+                    for (const frame of frames) {
+                        const line = frame.trim();
+                        if (!line.startsWith('data: ')) continue;
+                        const payloadText = line.slice(6);
+
+                        let payload = null;
+                        try {
+                            payload = JSON.parse(payloadText);
+                        } catch {
+                            continue;
+                        }
+
+                        if (payload.type === 'token') {
+                            answerText += String(payload.content || '');
+                            botBubble.textContent = answerText;
+                            chatBox.scrollTop = chatBox.scrollHeight;
+                        } else if (payload.type === 'done') {
+                            const citations = Array.isArray(payload.citations) ? payload.citations : [];
+                            if (citations.length > 0) {
+                                citationsHtml = '<div class="citations">📎 引用来源：' +
+                                    citations.map(c => `[${escapeHtml(c.source_id)}]`).join(' ') +
+                                    '</div>';
+                            }
+                            botBubble.innerHTML = `${escapeHtml(answerText)}${citationsHtml}`;
+                            chatBox.scrollTop = chatBox.scrollHeight;
+                        } else if (payload.type === 'error') {
+                            botBubble.innerHTML = `<span style="color:#c62828">❌ 错误：${escapeHtml(payload.message || '请求失败')}</span>`;
+                            chatBox.scrollTop = chatBox.scrollHeight;
+                        }
                     }
-                    chatBox.innerHTML += `<div class="chat-msg bot">${escapeHtml(data.answer)}${citationsHtml}</div>`;
-                } else {
-                    const errMsg = formatErrorDetail(data.detail || data);
-                    chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 错误：${escapeHtml(errMsg)}</div>`;
                 }
             } catch (e) {
-                chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 网络错误：${e.message}</div>`;
+                botBubble.innerHTML = `<span style="color:#c62828">❌ 网络错误：${escapeHtml(e.message)}</span>`;
             }
 
             btn.disabled = false;

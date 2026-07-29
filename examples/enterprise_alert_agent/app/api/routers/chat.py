@@ -1,6 +1,9 @@
+import json
+from collections.abc import Generator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 
 from app.application.services.chat_service import ChatService
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest
@@ -85,6 +88,44 @@ def chat(
         raise
 
 
+@router.post("/stream")
+@limiter.limit("10/minute")
+def chat_stream(
+    request: Request, req: ChatRequest, service: Annotated[ChatService, Depends(_get_chat_service)]
+) -> StreamingResponse:
+    root_run = service.trace.start_root(
+        name="api.chat.stream",
+        run_type="chain",
+        inputs={"query": req.query, "business_context": req.business_context},
+        tags=["chat", "request", "stream"],
+    )
+
+    def iter_sse() -> Generator[str, None, None]:
+        stream_request_id: str | None = None
+        try:
+            for chunk in service.ask_stream(req, parent_run=root_run):
+                stream_request_id = str(chunk.get("request_id") or "")
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        finally:
+            service.trace.end_run(
+                root_run,
+                outputs={
+                    "request_id": stream_request_id,
+                    "stream": True,
+                },
+            )
+
+    return StreamingResponse(
+        iter_sse(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.post("/memory/clear")
 def clear_memory(
     request: Request, req: ClearRequest, service: Annotated[ChatService, Depends(_get_chat_service)]
@@ -146,22 +187,17 @@ async def submit_intervention(
         "elapsed_time_ms": 1234
     }
     """
-    try:
-        result = service._intervention_handler.submit_intervention(
-            task_id=request_id,
-            request=intervention,
-        )
-        return {
-            "intervention_id": result.intervention_id,
-            "success": result.success,
-            "output": result.output,
-            "error_message": result.error_message,
-            "elapsed_time_ms": result.elapsed_time_ms,
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"处理干预请求时出错: {e!s}"
-        )
+    result = service._intervention_handler.submit_intervention(
+        task_id=request_id,
+        request=intervention,
+    )
+    return {
+        "intervention_id": result.intervention_id,
+        "success": result.success,
+        "output": result.output,
+        "error_message": result.error_message,
+        "elapsed_time_ms": result.elapsed_time_ms,
+    }
 
 
 @router.get("/{request_id}/intervention-history")
