@@ -7,8 +7,8 @@ from app.infrastructure.queue.dlq_handler import (
 )
 
 __all__ = [
-    "DeadLetterQueue",
     "DLQEntry",
     "DLQStatus",
+    "DeadLetterQueue",
     "dead_letter_queue",
 ]

@@ -118,6 +118,10 @@ class Settings(BaseSettings):
         "wait_10s": 10.0,
         "wait_30s": 30.0,
     }
+    # ========== 安全配置==========
+    admin_jwt_secret: str = "CHANGE_ME_IN_ENV"
+    admin_jwt_algorithm: str = "HS256"
+    admin_jwt_exp_minutes: int = 120
 
 
 settings = Settings()

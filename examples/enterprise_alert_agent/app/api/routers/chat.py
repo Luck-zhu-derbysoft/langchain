@@ -1,4 +1,4 @@
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -8,42 +8,46 @@ from app.infrastructure.llm.model_client import (
     ModelAuthError,
     ModelRequestError,
 )
-from app.observability.alert_types import AlertSeverity, AlertTypes
-from app.schemas.chat import ChatRequest, ChatResponse, ClearRequest
-from app.observability.langsmith_tracer import LangSmithTracer
 from app.infrastructure.memory.redis_postgres_conversation_memory import MemoryScope
 from app.main import limiter
+from app.observability.alert_types import AlertSeverity, AlertTypes
+from app.observability.langsmith_tracer import LangSmithTracer
+from app.schemas.chat import ChatRequest, ChatResponse, ClearRequest
+
 router = APIRouter(prefix="/chat", tags=["chat"])
 # 在模块级别创建干预处理器实例
 
 
 def _get_chat_service(request: Request) -> ChatService:
-   deps = request.app.state.shared_dependencies
-   return ChatService(
+    deps = request.app.state.shared_dependencies
+    return ChatService(
         model_client=deps["model_client"],
         retriever=deps["retriever"],
         trace=deps["trace"],
         memory=deps["memory"],
-        _intervention_handler=deps["_intervention_handler"],
-        _alert_manager=deps["_alert_manager"],
-        _metrics_collector=deps["_metrics_collector"],
+        _intervention_handler=deps["intervention_handler"],
+        _alert_manager=deps["alert_manager"],
+        _metrics_collector=deps["metrics_collector"],
         agent_registry=deps["agent_registry"],
         orchestrator=deps["orchestrator"],
     )
+
+
 @router.post("", response_model=ChatResponse)
 @limiter.limit("10/minute")
-def chat(request: Request, req: ChatRequest, service: Annotated[ChatService, Depends(_get_chat_service)]) -> ChatResponse:
+def chat(
+    request: Request, req: ChatRequest, service: Annotated[ChatService, Depends(_get_chat_service)]
+) -> ChatResponse:
     # 新增 root run，追踪整个聊天请求的生命周期
     root_run = service.trace.start_root(
         name="api.chat",
         run_type="chain",
-        inputs={"query": req.query,"business_context": req.business_context},
+        inputs={"query": req.query, "business_context": req.business_context},
         tags=["chat", "request"],
     )
 
-
     try:
-        resp = service.ask(req,parent_run=root_run)
+        resp = service.ask(req, parent_run=root_run)
         service.trace.end_run(
             root_run,
             outputs={
@@ -51,18 +55,18 @@ def chat(request: Request, req: ChatRequest, service: Annotated[ChatService, Dep
                 "answer_preview": resp.answer[:1000] if resp.answer else "",
                 "answer_length": len(resp.answer),
                 "citations_count": len(resp.citations),
-                },
+            },
         )
         return resp
     except ModelAuthError as exc:
-            service.trace.end_run(
-                root_run,
-                error=LangSmithTracer.format_error(exc),
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="模型鉴权失败，请检查 DASHSCOPE_API_KEY 是否正确且可用。",
-            ) from exc
+        service.trace.end_run(
+            root_run,
+            error=LangSmithTracer.format_error(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="模型鉴权失败，请检查 DASHSCOPE_API_KEY 是否正确且可用。",
+        ) from exc
     except ModelRequestError as exc:
         service.trace.end_run(
             root_run,
@@ -82,7 +86,9 @@ def chat(request: Request, req: ChatRequest, service: Annotated[ChatService, Dep
 
 
 @router.post("/memory/clear")
-def clear_memory(request: Request, req: ClearRequest, service: Annotated[ChatService, Depends(_get_chat_service)]) -> dict[str, str]:
+def clear_memory(
+    request: Request, req: ClearRequest, service: Annotated[ChatService, Depends(_get_chat_service)]
+) -> dict[str, str]:
     scope = MemoryScope(
         tenant_id=req.tenant_id,
         user_id=req.user_id,
@@ -91,8 +97,11 @@ def clear_memory(request: Request, req: ClearRequest, service: Annotated[ChatSer
     service.memory.clear_memory(scope)
     return {"message": "Memory cleared for the specified thread."}
 
+
 @router.get("/{request_id}/pending-intervention")
-async def get_pending_intervention(request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
+async def get_pending_intervention(
+    request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]
+):
     """
     获取正在等待用户干预的请求
 
@@ -107,12 +116,17 @@ async def get_pending_intervention(request_id: str, service: Annotated[ChatServi
     pending_list = service._intervention_handler.get_pending_intervention(request_id)
     return {
         "request_id": request_id,
-        "pending_interventions":[ p.dict() if hasattr(p,'dict') else p for p in pending_list],
+        "pending_interventions": [p.dict() if hasattr(p, "dict") else p for p in pending_list],
         "count": len(pending_list),
     }
 
+
 @router.post("/{request_id}/intervention")
-async def submit_intervention(request_id: str, intervention:ManualInterventionRequest, service: Annotated[ChatService, Depends(_get_chat_service)]):
+async def submit_intervention(
+    request_id: str,
+    intervention: ManualInterventionRequest,
+    service: Annotated[ChatService, Depends(_get_chat_service)],
+):
     """
     提交人工干预请求
 
@@ -142,35 +156,40 @@ async def submit_intervention(request_id: str, intervention:ManualInterventionRe
             "success": result.success,
             "output": result.output,
             "error_message": result.error_message,
-            "elapsed_time_ms": result.elapsed_time_ms
+            "elapsed_time_ms": result.elapsed_time_ms,
         }
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"处理干预请求时出错: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"处理干预请求时出错: {e!s}"
         )
+
+
 @router.get("/{request_id}/intervention-history")
-async def get_intervention_history(request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
+async def get_intervention_history(
+    request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]
+):
     """获取该请求的所有干预历史"""
     history = service._intervention_handler.get_intervention_history(request_id)
     return {
         "request_id": request_id,
-        "interventions": [h.dict() if hasattr(h,'dict') else h for h in history],
-        "total": len(history)
+        "interventions": [h.dict() if hasattr(h, "dict") else h for h in history],
+        "total": len(history),
     }
 
 
 @router.get("/alerts")
 async def get_alerts(
     service: Annotated[ChatService, Depends(_get_chat_service)],
-    alert_type: Optional[str] = None,
-    severity: Optional[str] = None,
+    alert_type: str | None = None,
+    severity: str | None = None,
     limit: int = 100,
-    ):
+):
     # 调用 alert_manager 获取告警
     alert_type_enum = AlertTypes(alert_type) if alert_type else None
     severity_enum = AlertSeverity(severity) if severity else None
-    alerts = service.alert_manager.get_alerts(alert_type=alert_type_enum, severity=severity_enum, limit=limit)
+    alerts = service.alert_manager.get_alerts(
+        alert_type=alert_type_enum, severity=severity_enum, limit=limit
+    )
     return {
         "total": len(alerts),
         "alerts": [
@@ -185,26 +204,28 @@ async def get_alerts(
                 "timestamp": alert.timestamp.isoformat(),
             }
             for alert in alerts
-        ]
+        ],
     }
+
+
 @router.post("/alerts/{alert_id}/acknowledge")
-async def acknowledge_alert(alert_id: str, acknowledged_by: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
+async def acknowledge_alert(
+    alert_id: str, acknowledged_by: str, service: Annotated[ChatService, Depends(_get_chat_service)]
+):
     """确认告警"""
     success = service.alert_manager.acknowledge_alert(alert_id, acknowledged_by)
     if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"告警 {alert_id} 未找到"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"告警 {alert_id} 未找到")
     return {"success": True}
+
+
 @router.get("/metrics/{request_id}")
 async def get_metrics(request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
     """获取该请求的性能指标"""
     metrics = service.metrics_collector.get_metrics(request_id)
     if not metrics:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"请求 {request_id} 的性能指标未找到"
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"请求 {request_id} 的性能指标未找到"
         )
     return {
         "request_id": metrics.request_id,
@@ -219,4 +240,3 @@ async def get_metrics(request_id: str, service: Annotated[ChatService, Depends(_
         "error_count": metrics.error_count,
         "retry_count": metrics.retry_count,
     }
-

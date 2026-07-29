@@ -6,15 +6,21 @@
 - 失败原因归类统计
 """
 
-from dataclasses import field
+import json
+import logging
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from dataclasses import asdict, field
 from datetime import datetime, timezone
 from enum import Enum
-import logging
-import uuid
-import threading
+from typing import Any, cast
 
+import redis
 from pydantic.dataclasses import dataclass
-from typing import Any, Callable
+
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +44,78 @@ class DLQEntry:
     status: DLQStatus = DLQStatus.PENDING
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     last_retry_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+            data = asdict(self)
+            data["status"] = self.status.value
+            return data
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> DLQEntry:
+        return DLQEntry(
+            dlq_id=data["dlq_id"],
+            task_id=data["task_id"],
+            payload=data["payload"],
+            failure_reason=data["failure_reason"],
+            retry_count=data.get("retry_count", 0),
+            max_retries=data.get("max_retries", 3),
+            status=DLQStatus(data["status"]),
+            created_at=data["created_at"],
+            last_retry_at=data.get("last_retry_at"),
+        )
+
 class DeadLetterQueue:
     "线程安全的死信队列处理器"
     def __init__(self,max_retries: int = 3,backoff_base_seconds: int = 1)-> None:
-        self._entries: dict[str, DLQEntry] = {}
         self.max_retries = max_retries
         self.backoff_base_seconds = backoff_base_seconds
         self._lock = threading.Lock()
+        self._entries: dict[str, DLQEntry] = {}
+        self.redis = self._build_redis_client()
+        self._redis_index_key = "dlq:index"
+        self._load_existing_entries()
+    @staticmethod
+    def _build_redis_client()->redis.Redis | None:
+        """创建Redis客户端"""
+        try:
+            return redis.Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                db=settings.redis_db,
+                password=settings.redis_password,
+                decode_responses=True,
+                socket_timeout=2,
+            )
+        except ImportError:
+            logger.warn("Redis module not found, please install it with `pip install redis`")
+            return None
+    def _entry_keys(self, dlq_id: str) -> str:
+        """生成Redis键"""
+        return f"dlq:entry:{dlq_id}"
+    def _persist_entry(self, entry: DLQEntry) -> None:
+        """将条目持久化到Redis"""
+        if not self.redis:
+            return
+        try:
+            self.redis.set(self._entry_keys(entry.dlq_id),json.dumps(entry.to_dict(), ensure_ascii=False))
+            self.redis.sadd(self._redis_index_key, entry.dlq_id)
+        except Exception as e:
+            logger.error(f"Failed to persist DLQ entry: {e}")
+
+    def _load_existing_entries(self) -> None:
+        """从Redis加载现有条目"""
+        if not self.redis:
+            return
+        try:
+            if self.redis:
+                dlq_ids = self.redis.smembers(self._redis_index_key)
+                for dlq_id in dlq_ids:
+                    str_dlq_id = cast(str, dlq_id)
+                    entry_data = self.redis.get(self._entry_keys(str_dlq_id))
+                    if entry_data:
+                        entry = DLQEntry.from_dict(json.loads(entry_data))
+                        self._entries[str_dlq_id] = entry
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
 
     def add(self, task_id: str, payload: dict[str, Any], failure_reason: str) -> DLQEntry:
         """添加死信队列条目"""
@@ -58,22 +129,26 @@ class DeadLetterQueue:
                 max_retries=self.max_retries
             )
             self._entries[dlq_id] = entry
-        logger.warn(f"Added DLQ entry: {entry}")
+            self._persist_entry(entry)
+        logger.warning(f"Added DLQ entry: {entry}")
         return entry
     def retry(self,dlq_id:str,execute:Callable[[dict[str,Any]],Any])->bool:
         """重试死信队列条目"""
         with self._lock:
             entry = self._entries.get(dlq_id)
             if entry is None or entry.status in {DLQStatus.RESOLVED, DLQStatus.ABANDONED}:
-                logger.warn(f"DLQ entry not found or already resolved/abandoned: {dlq_id}")
+                logger.warning(f"DLQ entry not found or already resolved/abandoned: {dlq_id}")
                 return False
             if entry.retry_count >= entry.max_retries:
                 entry.status = DLQStatus.ABANDONED
-                logger.warn(f"DLQ entry abandoned after max retries: {entry}")
+                self._persist_entry(entry)
+                logger.warning(f"DLQ entry abandoned after max retries: {entry}")
                 return False
             entry.retry_count += 1
             entry.last_retry_at = datetime.now(timezone.utc).isoformat()
             entry.status = DLQStatus.RETRYING
+            self._persist_entry(entry)
+        time.sleep(self.backoff_base_seconds * (2 ** max(entry.retry_count - 1, 0)))
         try:
             execute(entry.payload)
         except Exception as e:
@@ -81,6 +156,7 @@ class DeadLetterQueue:
             return False
         with self._lock:
             entry.status = DLQStatus.RESOLVED
+            self._persist_entry(entry)
         logger.info(f"DLQ entry resolved after retry: {entry}")
         return True
     def list_pending(self)->list[DLQEntry]:

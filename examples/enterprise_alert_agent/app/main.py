@@ -3,32 +3,37 @@ import logging
 import sys
 from pathlib import Path
 
-from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
-from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
-from app.infrastructure.agent.intervention_handler import InterventionHandler
-from app.infrastructure.embedding.embedding_client import EmbeddingClient
-from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
-from app.infrastructure.memory.redis_postgres_conversation_memory import RedisPostgresConversationMemoryStore
-from app.infrastructure.vectorstore.chroma_store import ChromaStore
-from app.observability import alert_manager
-from app.observability.alert_manager import AlertManager
-from app.observability.metrics import MetricsCollector
-from app.rag.retrieval.retriever import Retriever
-
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.config.settings import settings
-from app.config.tracing_config import configure_langsmith,get_langsmith_client, is_langsmith_enabled
+from app.config.tracing_config import (
+    configure_langsmith,
+    get_langsmith_client,
+    is_langsmith_enabled,
+)
+from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
+from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
+from app.infrastructure.agent.intervention_handler import InterventionHandler
+from app.infrastructure.audit.audit_logger import audit_logger
+from app.infrastructure.embedding.embedding_client import EmbeddingClient
+from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.llm.model_client import ModelAuthError, ModelClient, ModelRequestError
+from app.infrastructure.memory.redis_postgres_conversation_memory import (
+    RedisPostgresConversationMemoryStore,
+)
+from app.infrastructure.vectorstore.chroma_store import ChromaStore
+from app.observability import alert_manager
 from app.observability.langsmith_tracer import LangSmithTracer
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
+from app.observability.metrics import MetricsCollector
+from app.rag.retrieval.retriever import Retriever
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -37,10 +42,10 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     configure_langsmith()
+    from app.api.routers.admin import router as admin_router
     from app.api.routers.chat import router as chat_router
     from app.api.routers.health import router as health_router
     from app.api.routers.ingest import router as ingest_router
-    from app.api.routers.admin import router as admin_router
     app = FastAPI(
         title=settings.app_name,
         version="0.2.0",
@@ -64,13 +69,7 @@ def create_app() -> FastAPI:
     model_client = ModelClient(tracer=trace)
     fault_analyzer = FaultAnalyzer()
     intervention_handler = InterventionHandler()
-    alert_manager = AlertManager()
     metrics_collector = MetricsCollector()
-    _intervention_handler = InterventionHandler()
-    _alert_manager = alert_manager.AlertManager()
-    _metrics_collector = MetricsCollector()
-
-    trace = trace
     agent_registry = AgentRegistry()
     agent_registry.register_agent(
         AgentDescriptor(
@@ -123,9 +122,7 @@ def create_app() -> FastAPI:
         "intervention_handler": intervention_handler,
         "alert_manager": alert_manager,
         "metrics_collector": metrics_collector,
-        "_intervention_handler": _intervention_handler,
-        "_alert_manager": _alert_manager,
-        "_metrics_collector": _metrics_collector,
+        "audit_logger": audit_logger,
     }
 
     # 静态文件和首页

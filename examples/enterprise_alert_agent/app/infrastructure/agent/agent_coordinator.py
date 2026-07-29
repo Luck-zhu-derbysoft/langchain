@@ -1,11 +1,12 @@
-
-
-
-from dataclasses import dataclass
 import time
-from typing     import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
-from app.infrastructure.agent.a2a_protocol import AgentTaskExecutionRequest, AgentTaskExecutionResult, SubTask
+from app.infrastructure.agent.a2a_protocol import (
+    AgentTaskExecutionRequest,
+    AgentTaskExecutionResult,
+    SubTask,
+)
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
 
 
@@ -15,14 +16,15 @@ class AgentDispatchResult:
     agent_id: str
     success: bool
     output: str
-    retry_count: int =0
+    retry_count: int = 0
     user_fallback: bool = False
+
 
 class MultiAgentOrchestrator:
     def __init__(self, registry: AgentRegistry) -> None:
         self.registry = registry
 
-    def  select_agent_by_subtask(self, subtask: SubTask) -> AgentDescriptor:
+    def select_agent_by_subtask(self, subtask: SubTask) -> AgentDescriptor:
         if subtask.preferred_tool:
             agents = self.registry.find_by_tool(subtask.preferred_tool)
             for agent in agents:
@@ -32,7 +34,7 @@ class MultiAgentOrchestrator:
         router_agent = sorted(
             self.registry.find_by_capability("intent_routing"),
             key=lambda a: a.priority,
-            reverse=True
+            reverse=True,
         )
         for agent in router_agent:
             if self.registry.is_healthy(agent.agent_id):
@@ -45,9 +47,11 @@ class MultiAgentOrchestrator:
             priority=0,
         )
 
-    def execute_with_callback_agent(self,
-                                    request:AgentTaskExecutionRequest,
-                                    callback_execute: Callable[[str,str],str],)-> AgentTaskExecutionResult:
+    def execute_with_callback_agent(
+        self,
+        request: AgentTaskExecutionRequest,
+        callback_execute: Callable[[str, str], str],
+    ) -> AgentTaskExecutionResult:
         started = time.perf_counter()
         try:
             output = callback_execute(request.query, request.agent_id)
@@ -58,7 +62,7 @@ class MultiAgentOrchestrator:
                 agent_id=request.agent_id,
                 success=True,
                 output=output,
-                latency_ms=latency_ms
+                latency_ms=latency_ms,
             )
         except Exception as e:
             output = str(e)
@@ -70,7 +74,5 @@ class MultiAgentOrchestrator:
                 success=False,
                 output=output,
                 error_type=type(e).__name__,
-                latency_ms=latency_ms
+                latency_ms=latency_ms,
             )
-
-
