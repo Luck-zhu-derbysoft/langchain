@@ -108,7 +108,23 @@ class Settings(BaseSettings):
     mcp_port: int = 3000
     mcp_path: str = "/mcp"
     mcp_api_key: str = ""
-    mcp_enable_services: list[str] = ["mysql"]  # 允许被 MCP 调用的工具列表
+    mcp_enable_services: list[str] = ["mysql", "remote_rfp"]  # 允许被 MCP 调用的工具列表
+    # 外部 MCP 开关
+    mcp_upstream_enabled: bool = True
+    # 上游定义，建议放 .env 里用 JSON 字符串注入
+    # 示例:
+    # [
+    #   {
+    #     "name":"rfp_gateway",
+    #     "url":"http://localhost:8081/dmatch-main/mcp",
+    #     "headers":{"X-Access-Key":"xxx","Cookie":"r_token=xxx"},
+    #     "allowed_tools":["queryRfpHotelBids","queryRfpHotelQuotation"]
+    #   }
+    # ]
+    mcp_upstreams_json: str = '[{"name":"rfp_gateway","url":"http://10.200.0.241:8081/dmatch-main/mcp","headers":{"X-Access-Key":"mcp-Hvo6FhKcRFxSxsv2vJbUQHy3C6IzdspOzjDlhb8","Cookie":"r_token=HA"},"allowed_tools":["queryRfpHotelBids","getRfpHotelBidDetail"]}]'
+
+    # 代理调用默认超时
+    mcp_upstream_timeout_seconds: int = 20
     # ========== 故障诊断配置==========
     fault_diagnosis_enabled: bool = True
     fault_alert_threshold: str = "high"  # "low", "medium", "high", "critical"
@@ -122,6 +138,8 @@ class Settings(BaseSettings):
     admin_jwt_secret: str = "CHANGE_ME_IN_ENV"
     admin_jwt_algorithm: str = "HS256"
     admin_jwt_exp_minutes: int = 120
+
+
 
 
 settings = Settings()
