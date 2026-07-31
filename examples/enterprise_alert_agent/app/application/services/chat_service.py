@@ -34,7 +34,7 @@ from app.infrastructure.llm.model_client import (
     ModelClient,
     ModelRequestError,
 )
-from app.infrastructure.mcp.mcp_tool import get_tool_map, get_tools_metadata
+from app.infrastructure.mcp.mcp_client import get_tool_map, get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
     MemoryScope,
     RedisPostgresConversationMemoryStore,

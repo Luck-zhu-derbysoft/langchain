@@ -142,7 +142,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def startup_checks() -> None:
-        from app.infrastructure.mcp.mcp_tool import async_init_mcp
+        from app.infrastructure.mcp.mcp_client import async_init_mcp
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
         app.state.mcp_ready = False

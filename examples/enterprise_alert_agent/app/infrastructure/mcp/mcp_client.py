@@ -1,111 +1,100 @@
+
+
+import asyncio
+import concurrent.futures
 import logging
 from typing import Any
 
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
-
 from app.config.settings import settings
+from app.infrastructure.mcp.mcp_service import RemoteMCPClient
 
 logger = logging.getLogger(__name__)
 
+#全局客户端实例
+_mcp_client: RemoteMCPClient | None = None
+_init_lock: asyncio.Lock = asyncio.Lock()  # ← 在模块级定义
 
-class MCPRemoteError(Exception):
-    """Base class for MCP remote errors."""
 
-
-class RemoteMCPClient:
-    def __init__(self) -> None:
-        self._tools_meta: list[dict[str, Any]] = []
-        self._initialized = False
-
-    async def initialize(self) -> bool:
-        if self._initialized:
+async def async_init_mcp() -> bool:
+    global _mcp_client
+    if _mcp_client is not None:
+        logger.info("MCP already initialized")
+        return True
+    if not settings.mcp_enabled:
+        logger.info("MCP disabled by configuration")
+        return False
+    async with _init_lock:
+        if _mcp_client is not None:
+            logger.info("MCP already initialized by another thread")
             return True
         try:
-            headers: dict[str, str] = {}
-            if settings.mcp_api_key:
-                headers["X-Access-Key"] = settings.mcp_api_key
-            if settings.mcp_cookie:
-                headers["Cookie"] = settings.mcp_cookie
-            # 发送请求到 MCP 服务，获取工具元信息
-            async with (
-                create_mcp_http_client(headers=headers) as http_client,
-                streamable_http_client(url=settings.mcp_service_url, http_client=http_client) as (
-                    read,
-                    write,
-                    _,
-                ),
-                ClientSession(read_stream=read, write_stream=write) as session,
-            ):
-                await session.initialize()
-                tools_results = await session.list_tools()
-                self._tools_meta = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.inputSchema or {},
-                        },
-                    }
-                    for tool in tools_results.tools
-                ]
-                self._initialized = True
-            logger.info("MCP client initialized successfully with %d tools", len(self._tools_meta))
+            _mcp_client = RemoteMCPClient()
+            ok = await _mcp_client.initialize()
+            if not ok:
+                logger.warning("MCP initialize failed: %s", settings.mcp_service_url)
+                return False
+            logger.info("MCP initialized successfully")
             return True
-        except Exception as e:
-            logger.exception("MCP client initialization failed: %s", e)
+        # 分层捕获异常，精细化日志
+        except TimeoutError:
+            logger.error("MCP connect timeout, service_url=%s", settings.mcp_service_url)
+            return False
+        except ConnectionError as e:
+            logger.error("MCP service connection refused, url=%s err=%s", settings.mcp_service_url, str(e))
+            return False
+        except Exception:
+            # 兜底捕获，打印完整堆栈便于排错
+            logger.exception("Failed to init MCP client, config url=%s", settings.mcp_service_url)
             return False
 
-    async def call_tool(self, tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
+def get_tools_metadata() -> list:
+# {
+#                         "type": "function",
+#                         "function": {
+#                             "name": tool.name,
+#                             "description": tool.description,
+#                             "parameters": tool.inputSchema or {},
+#                         },
+#                     }
+    if _mcp_client is None:
+        return []
+    return _mcp_client.get_tools_metadata()
 
-        headers: dict[str, str] = {}
-        if settings.mcp_api_key:
-            headers["X-Access-Key"] = settings.mcp_api_key
-        if settings.mcp_cookie:
-            headers["Cookie"] = settings.mcp_cookie
-        # 发送请求到 MCP 服务，获取工具元信息
+def get_tool_map() -> dict:
+    if _mcp_client is None:
+        return {}
+    tool_map = {}
+    for tool in _mcp_client.get_tools_metadata():
+        name = tool["function"]["name"]
+        tool_map[name] = _make_remote_tool_func(_mcp_client, name)
+    return tool_map
+# LLM输出工具调用
+#         ↓
+# name = "queryRfpHotelBids" , arguments = {city:"上海"}
+#         ↓
+# func = tool_map[name]
+#         ↓
+# func(**arguments) → tool_function(city="上海")
+#         ↓
+# 闭包携带tool_name + kwargs → _mcp_client.call_tool(tool_name, kwargs)
+#         ↓
+# 发起HTTP/SSE请求调用Java MCP服务
+#         ↓
+# 结果原路逐层返回
+def _make_remote_tool_func(mcp_client: RemoteMCPClient, tool_name: str):
+    """生成闭包函数，固化mcp_client tool_name"""
+    def tool_function(**kwargs: Any) -> Any:
         try:
-            async with (
-                create_mcp_http_client(headers=headers) as http_client,
-                streamable_http_client(url=settings.mcp_service_url, http_client=http_client) as (
-                    read,
-                    write,
-                    _,
-                ),
-                ClientSession(read_stream=read, write_stream=write) as session,
-            ):
-                await session.initialize()
-                result = await session.call_tool(name=tool_name, arguments=tool_args)
-                content = result.content
-                if isinstance(content, list) and content:
-                    texts = [
-                        getattr(item, "text", str(item)) for item in content if item is not None
-                    ]
-                    return {
-                        "status": "success",
-                        "data": [{"result": "\n".join(texts)}],
-                        "row_count": len(content),
-                        "error_code": "",
-                        "message": "ok",
-                    }
-                return {
-                    "status": "success",
-                    "data": [],
-                    "row_count": 0,
-                    "error_code": "",
-                    "message": "ok",
-                }
-        except Exception as e:
-            logger.exception("MCP client call failed: %s", e)
-            return {
-                "status": "error",
-                "data": [],
-                "row_count": 0,
-                "error_code": "",
-                "message": str(e),
-            }
+            loop = asyncio.get_running_loop()
+            running = loop.is_running()
+        except RuntimeError:
+            running = False
+        if running:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                return executor.submit(
+                    lambda: asyncio.run(mcp_client.call_tool(tool_name, kwargs))
+                ).result()
+        else:
+            return asyncio.run(mcp_client.call_tool(tool_name, kwargs))
 
-    def get_tools_metadata(self) -> list[dict[str, Any]]:
-        return self._tools_meta
+    return tool_function
