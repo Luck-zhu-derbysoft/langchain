@@ -94,7 +94,7 @@ class RemoteMCPClient:
                     "message": "ok",
                 }
         except Exception as e:
-            logger.exception("MCP client call failed: %s", e)
+            logger.exception("MCP client call failed: %s")
             return {
                 "status": "error",
                 "data": [],
