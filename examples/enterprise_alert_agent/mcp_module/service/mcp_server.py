@@ -9,7 +9,7 @@ from mcp_module.service.mysql_service import register_mysql_service
 ServiceRegistrar = Callable[[FastMCP], None]
 
 SERVICE_REGISTRY: dict[str, ServiceRegistrar] = {
-    "mysql": register_mysql_service,
+    # "mysql": register_mysql_service,
     "remote_rfp": register_mcp_remote_rfp_service,
 }
 

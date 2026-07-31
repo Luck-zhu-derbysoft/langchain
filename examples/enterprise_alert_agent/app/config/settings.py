@@ -8,19 +8,20 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
-
     dashscope_api_key: str = "DASHSCOPE_API_KEY"
     model_name: str = "qwen-plus"
-    fallback_model_name: str = "qwen-turbo"     # 主模型失败后的降级模型
+    fallback_model_name: str = "qwen-turbo"  # 主模型失败后的降级模型
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     request_timeout_seconds: int = 30
     model_startup_probe_enabled: bool = True
     model_max_retries: int = 2
-    agent_tool_failure_threshold: int = 2      # 工具连续失败超过此数降级为纯 RAG
+    agent_tool_failure_threshold: int = 2  # 工具连续失败超过此数降级为纯 RAG
     # ========================================================
     # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
     # ========================================================
-    agent_max_iterations: int = 3  # 允许 Agent 思考与调用工具的最大轮数            # LLM 失败重试次数
+    agent_max_iterations: int = (
+        3  # 允许 Agent 思考与调用工具的最大轮数            # LLM 失败重试次数
+    )
     task_max_retries: int = 2
     task_initial_backoff_seconds: float = 0.5
     task_max_workers: int = 4
@@ -45,8 +46,6 @@ class Settings(BaseSettings):
     langsmith_project: str = "enterprise-alert-agent"
     # ================================================
 
-
-
     # --- 检索与重排配置 ---
     retrieval_top_k: int = 8
     context_top_k: int = 3
@@ -63,7 +62,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
-    #mysql数据库配置
+    # mysql数据库配置
     mysql_host: str = "mysql_host"
     mysql_port: int = 3306
     mysql_db: str = "mysql_db"
@@ -72,9 +71,9 @@ class Settings(BaseSettings):
     sql_max_rows: int = 200
     sql_query_timeout_seconds: int = 5
     # 混合检索配置
-    retrieval_candidate_k: int = 12      # 初始召回
-    retrieval_final_k: int = 4           # 最终给上下文
-    retrieval_min_score: float = 0.45    # 过滤阈值
+    retrieval_candidate_k: int = 12  # 初始召回
+    retrieval_final_k: int = 4  # 最终给上下文
+    retrieval_min_score: float = 0.45  # 过滤阈值
     retrieval_hybrid_alpha: float = 0.7  # 稠密分占比
     retrieval_query_rewrite: bool = True
     retrieval_max_history_turns: int = 2
@@ -101,30 +100,10 @@ class Settings(BaseSettings):
     pg_password: str = "admin"
     pg_ssl_mode: str = "prefer"
     # --- MCP 配置 ---
-    mcp_service_url: str = "http://127.0.0.1:3000/mcp"
+    mcp_service_url: str = "http://10.200.0.241:8081/dmatch-main/mcp"
     mcp_enabled: bool = True
-    mcp_timeout: int = 30
-    mcp_host: str = "127.0.0.1"
-    mcp_port: int = 3000
-    mcp_path: str = "/mcp"
     mcp_api_key: str = ""
-    mcp_enable_services: list[str] = ["mysql", "remote_rfp"]  # 允许被 MCP 调用的工具列表
-    # 外部 MCP 开关
-    mcp_upstream_enabled: bool = True
-    # 上游定义，建议放 .env 里用 JSON 字符串注入
-    # 示例:
-    # [
-    #   {
-    #     "name":"rfp_gateway",
-    #     "url":"http://localhost:8081/dmatch-main/mcp",
-    #     "headers":{"X-Access-Key":"xxx","Cookie":"r_token=xxx"},
-    #     "allowed_tools":["queryRfpHotelBids","queryRfpHotelQuotation"]
-    #   }
-    # ]
-    mcp_upstreams_json: str = '[{"name":"rfp_gateway","url":"http://10.200.0.241:8081/dmatch-main/mcp","headers":{"X-Access-Key":"mcp-Hvo6FhKcRFxSxsv2vJbUQHy3C6IzdspOzjDlhb8","Cookie":"r_token=HA"},"allowed_tools":["queryRfpHotelBids","getRfpHotelBidDetail"]}]'
-
-    # 代理调用默认超时
-    mcp_upstream_timeout_seconds: int = 20
+    mcp_cookie: str = ""
     # ========== 故障诊断配置==========
     fault_diagnosis_enabled: bool = True
     fault_alert_threshold: str = "high"  # "low", "medium", "high", "critical"
@@ -138,8 +117,6 @@ class Settings(BaseSettings):
     admin_jwt_secret: str = "CHANGE_ME_IN_ENV"
     admin_jwt_algorithm: str = "HS256"
     admin_jwt_exp_minutes: int = 120
-
-
 
 
 settings = Settings()

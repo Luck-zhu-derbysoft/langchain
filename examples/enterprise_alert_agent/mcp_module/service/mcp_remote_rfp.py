@@ -1,8 +1,10 @@
 import asyncio
+import concurrent.futures
 import json
 import time
 from typing import Any, cast
 
+from deprecated import deprecated
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp import FastMCP
@@ -11,6 +13,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 from app.config.settings import settings
 
 
+@deprecated(reason="Use RemoteMCPClient instead", version="1.0.0")
 def _ok(data: Any, latency_ms: int = 0) -> dict[str, Any]:
     return {
         "status": "success",
@@ -39,14 +42,23 @@ def register_mcp_remote_rfp_service(service: FastMCP) -> None:
         upstream_name: str,
         tool_name: str,
         tool_args: dict[str, Any],
-        tool_id: str | None = None,
     ) -> dict[str, Any]:
+        """调用远程 MCP 服务
+
+        Args:
+            upstream_name: 上游服务名称，当前支持: rfp_gateway
+            tool_name: 工具名称。rfp_gateway 支持:
+                - queryRfpHotelBids: 查询 RFP 酒店投标列表，参数 {"rfpId": <Long>}
+                - getRfpHotelBidDetail: 查询 RFP 酒店投标详情，参数 {"rfpHotelId": <Long>}
+            tool_args: 工具参数，JSON 对象格式，不同工具参数不同，见 tool_name 说明。
+        """
+
         started = time.perf_counter()
         if not settings.mcp_upstream_enabled:
             return _error("远程 MCP 调用功能未启用", error_code="remote_mcp_disabled")
         if not isinstance(tool_args, dict):
             return _error("tool_args 必须是一个字典", error_code="invalid_tool_args")
-        #格式:[{"name":"rfp_gateway","url":"http://localhost:8081/dmatch-main/mcp","headers":{"X-Access-Key":"your-key","Cookie":"r_token=your-token"},"allowed_tools":["queryRfpHotelBids"]}]
+        # 格式:[{"name":"rfp_gateway","url":"http://localhost:8081/dmatch-main/mcp","headers":{"X-Access-Key":"your-key","Cookie":"r_token=your-token"},"allowed_tools":["queryRfpHotelBids"]}]
         upstreams = _load_upstreams()
         upstream = upstreams.get(upstream_name, {})
         # 检查上游 NAME存在
@@ -58,30 +70,46 @@ def register_mcp_remote_rfp_service(service: FastMCP) -> None:
         upstream_url = upstream.get("url")
         headers = upstream.get("headers", {})
         try:
-            result = asyncio.run(
-                    asyncio.wait_for(
-                        call_remote_mcp(
-                            upstream_url=cast(str, upstream_url),
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            headers=headers,
-                        ),
-                        timeout=settings.mcp_upstream_timeout_seconds,
-                        ) # 创建一个异步任务
+            loop = asyncio.get_running_loop()
+            running = loop.is_running()
+        except RuntimeError:
+            running = False
+        if running:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(
+                    lambda: asyncio.run(
+                        asyncio.wait_for(
+                            call_remote_mcp(
+                                upstream_url=cast(str, upstream_url),
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                headers=headers,
+                            ),
+                            timeout=settings.mcp_upstream_timeout_seconds,
+                        )
                     )
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            return _ok(
-                {
-                    "upstream_name": upstream_name,
-                    "tool_name": tool_name,
-                    "result": result,
-                },
-                latency_ms=latency_ms,
+                ).result()
+        else:
+            result = asyncio.run(
+                asyncio.wait_for(
+                    call_remote_mcp(
+                        upstream_url=cast(str, upstream_url),
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        headers=headers,
+                    ),
+                    timeout=settings.mcp_upstream_timeout_seconds,
+                )  # 创建一个异步任务
             )
-        except Exception as e:
-            return _error(f"远程 MCP 调用失败: {e!s}", error_code="remote_mcp_call_failed")
-        finally:
-            latency_ms = int((time.perf_counter() - started) * 1000)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        return _ok(
+            {
+                "upstream_name": upstream_name,
+                "tool_name": tool_name,
+                "result": result,
+            },
+            latency_ms=latency_ms,
+        )
 
 
 def _load_upstreams() -> dict[str, dict[str, Any]]:
@@ -105,7 +133,7 @@ def _load_upstreams() -> dict[str, dict[str, Any]]:
                     "allowed_tools": allowed_tools,
                 }
         return result
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         return {}
 
 
@@ -123,4 +151,16 @@ async def call_remote_mcp(
         ClientSession(read_stream=read, write_stream=write) as session,
     ):
         await session.initialize()
-        return await session.call_tool(name=tool_name, arguments=tool_args)
+        tool_result = await session.call_tool(name=tool_name, arguments=tool_args)
+        content = tool_result.content
+        if isinstance(content, list) and content:
+            first = content[0]
+            text = getattr(first, "text", str(first))
+            return {
+                "status": "success",
+                "data": [{"result": text}],
+                "row_count": 1,
+                "message": "ok",
+                "error_code": "",
+            }
+        return {"status": "success", "data": [], "row_count": 0, "message": "ok", "error_code": ""}
