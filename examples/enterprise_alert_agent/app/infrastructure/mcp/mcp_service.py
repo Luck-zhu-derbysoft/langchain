@@ -50,8 +50,8 @@ class RemoteMCPClient:
                 self._initialized = True
             logger.info("MCP client initialized successfully with %d tools", len(self._tools_meta))
             return True
-        except Exception as e:
-            logger.exception("MCP client initialization failed: %s", e)
+        except Exception :
+            logger.exception("MCP client initialization failed")
             return False
 
     async def call_tool(self, tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
