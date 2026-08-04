@@ -63,11 +63,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     # mysql数据库配置
-    mysql_host: str = "mysql_host"
+    mysql_host: str = "139.224.246.172"
     mysql_port: int = 3306
-    mysql_db: str = "mysql_db"
-    mysql_user: str = "mysql_user"
-    mysql_password: str = "mysql_password"
+    mysql_db: str = "agent"
+    mysql_user: str = "root"
+    mysql_password: str = "MyPass_2026_secure"
     sql_max_rows: int = 200
     sql_query_timeout_seconds: int = 5
     # 混合检索配置
@@ -83,24 +83,24 @@ class Settings(BaseSettings):
     time_query_skip_retrieval: bool = True
     time_query_skip_memory_write: bool = True
     # redis配置
-    redis_host: str = "10.200.0.241"
+    redis_host: str = "139.224.246.172"
     redis_port: int = 6379
     redis_db: int = 0
-    redis_password: str = "derbysoft"
+    redis_password: str = "MyRedisPass123!"
     memory_redact_pii: bool = True
     memory_ttl_days: int = 7
     redis_cache_ttl_seconds: int = 3600
     memory_summary_update_turn_threshold: int = 5
     cache_recent_turns_limit: int = 10
     # PostgreSQL 配置（替代 MySQL）
-    pg_host: str = "localhost"
+    pg_host: str = "139.224.246.172"
     pg_port: int = 5432
-    pg_db: str = "rag"
+    pg_db: str = "postgres"
     pg_user: str = "postgres"
-    pg_password: str = "admin"
+    pg_password: str = "postgres"
     pg_ssl_mode: str = "prefer"
     # --- MCP 配置 ---
-    mcp_service_url: str = "http://10.200.0.241:8081/dmatch-main/mcp"
+    mcp_service_url: str = "http://139.224.246.172:8080/sse"
     mcp_enabled: bool = True
     mcp_api_key: str = ""
     mcp_cookie: str = ""
