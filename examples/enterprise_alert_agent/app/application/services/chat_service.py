@@ -478,8 +478,10 @@ class ChatService:
             tags=["service", "chat", "stream"],
             parent_run=parent_run,
         )
+        start_time = time.perf_counter()
         request_id = str(uuid.uuid4())
         trace_id = request_id
+
         try:
             intent_classification, module_activation = self._classify_intent(
                 req.query, self.model_client, parent_run=ask_run
@@ -535,6 +537,52 @@ class ChatService:
                 "trace_id": trace_id,
                 "citations": [c.model_dump() for c in citations],
             }
+            #当前结果写入redis中做缓存
+            skip_memory_write = settings.time_query_skip_memory_write and self.is_query_time(
+                req.query
+            )
+            if skip_memory_write:
+                logger.info("[%s] Memory write-back skipped (time query)", request_id)
+            if not skip_memory_write:
+                # 1) 写入用户提问
+                self.memory.append_turn(
+                    history_scope,
+                    role="user",
+                    content=req.query,
+                    metadata={
+                        "request_id": request_id,
+                        "current_turn_count": memory_context.turn_count + 1,
+                    },
+                )
+                # 2) 写入工具调用结果作为系统消息
+                self.memory.append_turn(
+                    history_scope,
+                    role="assistant",
+                    content=answer,
+                    metadata={
+                        "request_id": request_id,
+                        "citations_count": len(citations),
+                    },
+                )
+                # 3) 达到阈值时更新长期摘要
+                after_turn_count = memory_context.turn_count + 2
+                logger.info(
+                    "[%s] Memory write-back done: after_turn_count=%d", request_id, after_turn_count
+                )
+                if after_turn_count >= settings.memory_summary_update_turn_threshold:
+                    logger.info("[%s] Updating long-term memory summary", request_id)
+                    summary_text = self.build_memory_summary(
+                        history_prompt_text=history_prompt_text,
+                        user_query=req.query,
+                        answer=answer,
+                        parent_run=ask_run,
+                    )
+                    self.memory.save_summary(history_scope, summary_text)
+            elapsed_time = time.perf_counter() - start_time
+            self.metrics_collector.record_latency(
+            request_id=request_id, latency_ms=elapsed_time * 1000
+            )
+
             self.trace.end_run(
                 ask_run,
                 outputs={
