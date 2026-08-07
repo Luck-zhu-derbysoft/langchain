@@ -463,7 +463,7 @@ class ChatService:
         except Exception as e:
             # 在异常情况下也要结束追踪
             self.metrics_collector.record_error(request_id=request_id)
-            logger.exception("[%s] Chat ask failed: %s", request_id, e)
+            logger.exception("[%s] Chat ask failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
             raise
 
@@ -481,10 +481,10 @@ class ChatService:
         start_time = time.perf_counter()
         request_id = str(uuid.uuid4())
         trace_id = request_id
-        #创建指标采集器
+        # 创建指标采集器
         self.metrics_collector.create_metrics(request_id=request_id)
         logger.info(
-            "[%s] Chat ask start: tenant=%s user=%s thread=%s query=%s",
+            "[%s] Chat ask_stream start: tenant=%s user=%s thread=%s query=%s",
             request_id,
             req.tenant_id,
             req.user_id,
@@ -492,11 +492,23 @@ class ChatService:
             str(req.query)[:200],
         )
 
+        def _yield_text_chunks(
+            text: str, chunk_size: int = 24
+        ) -> Generator[dict[str, Any], None, None]:
+            """将文本分块并逐步 yield"""
+            for i in range(0, len(text), chunk_size):
+                yield {
+                    "type": "token",
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "content": text[i : i + chunk_size],
+                }
+
         try:
             intent_classification, module_activation = self._classify_intent(
                 req.query, self.model_client, parent_run=ask_run
             )
-             # 初始化默认的工具选择
+            # 初始化默认的工具选择
             tool_selection: ToolSelection | None = None
             # 节点1：意图分类
             # 节点2：工具解析
@@ -683,7 +695,7 @@ class ChatService:
                     + "\n3) 不要再调用任何工具。"
                 )
                 logger.info("Agent entering summary phase to generate final answer")
-                final_answer = self.model_client.chat(
+                fallback_answer = self.model_client.chat(
                     user_query=req.query,
                     system_prompt=summary_prompt,
                     tools=[],
@@ -691,19 +703,11 @@ class ChatService:
                     parent_run=ask_run,
                     _token_counter=state.token_counter,  # ← 新增：传入 token 计数器
                 )
-                answer = str(final_answer or "").strip()
-            if not answer:
-                if tool_error_count > 0:
-                    answer = "部分数据工具调用失败，以下结论基于当前知识库与可用结果生成，建议稍后重试数据库查询。"
-                else:
-                    answer = "未能在限定轮次内生成最终答案。"
-
-
-
-
-
-
-
+                answer = str(fallback_answer or "").strip()
+            final_answer = str(answer or "").strip()
+            if final_answer:
+                yield from _yield_text_chunks(final_answer)
+            else:
                 answer_parts: list[str] = []
                 for piece in self.model_client.stream_chat(
                     req.query,
@@ -718,16 +722,16 @@ class ChatService:
                         "request_id": request_id,
                         "trace_id": trace_id,
                     }
-                answer = "".join(answer_parts)
-                if not answer:
-                    answer = "未能在限定轮次内生成最终答案。"
-            yield {
-                "type": "done",
-                "request_id": request_id,
-                "trace_id": trace_id,
-                "citations": [c.model_dump() for c in citations],
-            }
-            #当前结果写入redis中做缓存
+                final_answer = "".join(answer_parts).strip() or "未能在限定轮次内生成最终答案。"
+            # if not answer:
+            #     answer = "未能在限定轮次内生成最终答案。"
+            # yield {
+            #     "type": "done",
+            #     "request_id": request_id,
+            #     "trace_id": trace_id,
+            #     "citations": [c.model_dump() for c in citations],
+            # }
+            # 当前结果写入redis中做缓存
             skip_memory_write = settings.time_query_skip_memory_write and self.is_query_time(
                 req.query
             )
@@ -748,7 +752,7 @@ class ChatService:
                 self.memory.append_turn(
                     history_scope,
                     role="assistant",
-                    content=answer,
+                    content=final_answer,
                     metadata={
                         "request_id": request_id,
                         "citations_count": len(citations),
@@ -764,14 +768,73 @@ class ChatService:
                     summary_text = self.build_memory_summary(
                         history_prompt_text=history_prompt_context,
                         user_query=req.query,
-                        answer=answer,
+                        answer=final_answer,
                         parent_run=ask_run,
                     )
                     self.memory.save_summary(history_scope, summary_text)
             elapsed_time = time.perf_counter() - start_time
             self.metrics_collector.record_latency(
-            request_id=request_id, latency_ms=elapsed_time * 1000
+                request_id=request_id, latency_ms=elapsed_time * 1000
             )
+
+            metrics = self.metrics_collector.get_metrics(request_id=request_id)
+            performance_metrics = {
+                "total_time_ms": elapsed_time * 1000,
+                "p50_latency_ms": metrics.get_p50_latency() if metrics else 0,
+                "p95_latency_ms": metrics.get_p95_latency() if metrics else 0,
+                "p99_latency_ms": metrics.get_p99_latency() if metrics else 0,
+                "token_usage": metrics.token_usage if metrics else 0,
+                "estimated_cost_usd": metrics.estimated_cost_usd if metrics else 0,
+                "cache_hit_rate": metrics.get_cache_hit_rate() if metrics else 0,
+                "success_rate": metrics.get_success_rate() if metrics else 1.0,
+            }
+
+            resp = ChatResponse(
+                answer=final_answer,
+                citations=citations,
+                model=settings.model_name,
+                request_id=request_id,
+                intent=intent_classification.intent,
+                intent_confidence=intent_classification.confidence,
+                trace_id=trace_id,
+                selected_tool=None if not tool_selection else tool_selection.tool_name,
+                tool_confidence=None if not tool_selection else tool_selection.confidence,
+                fallback_tool=[] if not tool_selection else tool_selection.fallback_tools,
+                tool_selection_reason=None if not tool_selection else tool_selection.reasoning,
+                task_decomposed=state.task_decomposition is not None,
+                is_multi_task=state.is_multi_task,
+                multi_task_results=None
+                if not state.parallel_task_results
+                else {
+                    "completed_tasks": state.parallel_task_results.completed_tasks,
+                    "failed_tasks": state.parallel_task_results.failed_tasks,
+                    "total_tasks": state.parallel_task_results.total_tasks,
+                    "total_time": round(state.parallel_task_results.total_time, 3),
+                    "tools_used": state.parallel_task_results.tools_used,
+                    "success_rate": round(
+                        state.parallel_task_results.completed_tasks
+                        / state.parallel_task_results.total_tasks,
+                        3,
+                    )
+                    if state.parallel_task_results.total_tasks > 0
+                    else 0.0,
+                    "task_agent_mapping": state.parallel_task_results.task_agent_mapping,
+                    "task_status_mapping": state.parallel_task_results.task_status_mapping,
+                    "execution_batches": state.parallel_task_results.execute_batches,
+                    "skipped_task_ids": state.parallel_task_results.skipped_task_ids,
+                },
+                failed_tasks=state.failed_task_ids,
+                manual_intervention_required=False,
+                retry_count=state.retry_count,
+                fallback_used=state.fallback_used,
+                fallback_strategy=state.fallback_strategy,
+                active_agent_id=state.active_agent_id,
+                assigned_agent_ids=state.assigned_agent_ids,
+                performance_metrics=performance_metrics,
+            )
+
+            # model_dump 模型实例转换成标准 Python 字典 dict，方便序列化存入缓存、Redis、数据库
+            multi_tier_cache.set(req.query, resp.model_dump(), req.tenant_id)
 
             self.trace.end_run(
                 ask_run,
@@ -779,13 +842,44 @@ class ChatService:
                     "request_id": request_id,
                     "retrieved_docs": len(docs),
                     "model": settings.model_name,
-                    "intent": intent_classification.intent,
-                    "citations": len(citations),
+                    "is_multi_task": state.is_multi_task,
+                    "retry_count": state.retry_count,
+                    "fallback_used": state.fallback_used,
+                    "failed_tasks_count": len(state.failed_task_ids),
+                    "active_agent_id": state.active_agent_id,
+                    "assigned_agent_ids": state.assigned_agent_ids,
                     "stream": True,
                 },
             )
+
+            yield {
+                "type": "done",
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "answer": resp.answer,
+                "citations": [c.model_dump() for c in resp.citations],
+                "model": resp.model,
+                "intent": resp.intent,
+                "intent_confidence": resp.intent_confidence,
+                "selected_tool": resp.selected_tool,
+                "tool_confidence": resp.tool_confidence,
+                "fallback_tool": resp.fallback_tool,
+                "tool_selection_reason": resp.tool_selection_reason,
+                "task_decomposed": resp.task_decomposed,
+                "is_multi_task": resp.is_multi_task,
+                "multi_task_results": resp.multi_task_results,
+                "failed_tasks": resp.failed_tasks,
+                "manual_intervention_required": resp.manual_intervention_required,
+                "retry_count": resp.retry_count,
+                "fallback_used": resp.fallback_used,
+                "fallback_strategy": resp.fallback_strategy,
+                "active_agent_id": resp.active_agent_id,
+                "assigned_agent_ids": resp.assigned_agent_ids,
+                "performance_metrics": resp.performance_metrics,
+            }
         except ModelAuthError as e:
-            logger.exception("[%s] ModelAuthError failed: %s", request_id, e)
+            self.metrics_collector.record_error(request_id=request_id)
+            logger.exception("[%s] ModelAuthError failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
             yield {
                 "type": "error",
@@ -795,7 +889,8 @@ class ChatService:
                 "trace_id": trace_id,
             }
         except ModelRequestError as exc:
-            logger.exception("[%s] Chat ask_stream ModelRequestError failed: %s", request_id, exc)
+            self.metrics_collector.record_error(request_id=request_id)
+            logger.exception("[%s] Chat ask_stream ModelRequestError failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(exc))
             yield {
                 "type": "error",
@@ -805,7 +900,8 @@ class ChatService:
                 "trace_id": trace_id,
             }
         except Exception as e:
-            logger.exception("[%s] Chat ask_stream Exception failed: %s", request_id, e)
+            self.metrics_collector.record_error(request_id=request_id)
+            logger.exception("[%s] Chat ask_stream Exception failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
             yield {
                 "type": "error",
@@ -827,7 +923,7 @@ class ChatService:
         row_count_raw = tool_result.get("row_count", tool_result.get("count", len(data_list)))
         try:
             row_count = int(row_count_raw)
-        except Exception:
+        except (TypeError, ValueError):
             row_count = len(data_list)
 
         # 1. 检查状态是否成功
@@ -973,7 +1069,7 @@ class ChatService:
             )
             return intent_classification, module_activation
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - fallback to enable all modules on classifier failure
             logger.warning("Intent classification failed, falling back to all modules: %s", e)
             return IntentClassification(
                 intent="unknown",
@@ -1103,10 +1199,10 @@ class ChatService:
                     if isinstance(tool_args, str):
                         parsed_args = json.loads(tool_args)
                         if not isinstance(parsed_args, dict):
-                            raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
+                            raise TypeError("工具参数解析错误，应该是一个 JSON 对象。")
                         actual_args = parsed_args
                     if not isinstance(actual_args, dict):
-                        raise ValueError("工具参数解析错误，应该是一个 JSON 对象。")
+                        raise TypeError("工具参数解析错误，应该是一个 JSON 对象。")
                     result = skill_map[tool_name](**actual_args)
                     tool_summary = self.tool_result_to_string(result)
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
@@ -1120,7 +1216,7 @@ class ChatService:
                         state.read_only_mode = True
                         logger.warning("Tool failure threshold reached, forcing summary phase")
                         break
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - tool execution errors are converted to prompt feedback
                     state.tool_error_count += 1
                     error_msg = f"工具调用失败: {e}"
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
@@ -1149,7 +1245,7 @@ class ChatService:
                                 state.fallback_used = True
                                 state.fallback_strategy = "tool_chain"
                                 break
-                            except Exception as backup_e:
+                            except Exception as backup_e:  # noqa: BLE001 - continue trying next fallback tool
                                 logger.warning(
                                     "Fallback tool '%s' also failed: %s", backup_tool, backup_e
                                 )
@@ -1214,7 +1310,7 @@ class ChatService:
                 tool_selection.confidence,
             )
             return tool_selection
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - fallback to default tool selection on any model error
             logger.warning("Tool selection failed, defaulting to no tool: %s", e)
             first_tool_name = cast(
                 str, available_tools[0].get("name", "unknown") if available_tools else "unknown"
@@ -1439,7 +1535,7 @@ class ChatService:
                         subtask.assigned_agent_id,
                     )
                     break
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - per-subtask failures are handled by retry/fallback logic
                     last_error = str(e)
                     retry_times = attempt + 1
                     logger.warning(
@@ -1492,7 +1588,7 @@ class ChatService:
                                     subtask.assigned_agent_id,
                                 )
                                 break
-                            except Exception as backup_e:
+                            except Exception as backup_e:  # noqa: BLE001 - continue fallback chain after a tool failure
                                 logger.warning(
                                     "Fallback tool '%s' also failed for subtask %s: %s",
                                     backup_tool,
@@ -1569,7 +1665,7 @@ class ChatService:
                             )
                         time.sleep(backoff_time)
 
-            _, ok, msg, rt, _, assigned_agent_id = task_result
+            _, ok, msg, rt, _, _assigned_agent_id = task_result
             if not ok:
                 logger.warning(
                     "Subtask %s failed after %d retries, last error: %s ", subtask.task_id, rt, msg
@@ -1641,7 +1737,7 @@ class ChatService:
                             if used_fallback:
                                 state.fallback_used = True
                                 state.fallback_strategy = "tool_chain"
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - isolate failing future and continue processing others
                         task_status_map[task_id] = "failed"
                         failed_task_ids.append(task_id)
                         assigned_agent = task_agent_map.get(task_id, "unknown")
