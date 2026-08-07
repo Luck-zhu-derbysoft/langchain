@@ -481,56 +481,246 @@ class ChatService:
         start_time = time.perf_counter()
         request_id = str(uuid.uuid4())
         trace_id = request_id
+        #创建指标采集器
+        self.metrics_collector.create_metrics(request_id=request_id)
+        logger.info(
+            "[%s] Chat ask start: tenant=%s user=%s thread=%s query=%s",
+            request_id,
+            req.tenant_id,
+            req.user_id,
+            req.thread_id,
+            str(req.query)[:200],
+        )
 
         try:
             intent_classification, module_activation = self._classify_intent(
                 req.query, self.model_client, parent_run=ask_run
             )
+             # 初始化默认的工具选择
+            tool_selection: ToolSelection | None = None
+            # 节点1：意图分类
+            # 节点2：工具解析
+            tools_resolution = self._resolve_tools(module_activation)
+            available_tools: list[dict[str, Any]] = tools_resolution["available"]
+            SKILL_MAP: dict[str, SkillFunc] = tools_resolution["skill_map"]
+            mcp_tool_map: dict[str, SkillFunc] = tools_resolution["mcp_map"]
+            logger.info(
+                "[%s] Tools resolved: total=%d skills=%d mcp=%d",
+                request_id,
+                len(available_tools),
+                len(SKILL_MAP),
+                len(mcp_tool_map),
+            )
+            tool_selection = self._select_tool(
+                query=req.query,
+                intent_classification=intent_classification,
+                available_tools=available_tools,
+                parent_run=ask_run,
+            )
+            state = AgentState()
+            select_agent = self._select_agent(
+                intent_classification=intent_classification,
+                tool_selection=tool_selection,
+            )
+            state.active_agent_id = select_agent.agent_id
+            state.assigned_agent_ids.append(select_agent.agent_id)
+            logger.info("[%s] Agent selected: %s", request_id, select_agent.agent_id)
+            # 3 查询缓存数据
+            cached = multi_tier_cache.get(req.query, req.tenant_id)
+            if cached:
+                logger.info("[%s] Cache hit: returning cached answer", request_id)
+                cache_response = ChatResponse(**cached)  # 字典还原成Pydantic模型
+                cache_response.request_id = request_id  # 更新 request_id
+                cache_response.trace_id = trace_id  # 更新 trace_id
+                self.metrics_collector.record_cache_hit(request_id=request_id)
+                self.trace.end_run(
+                    ask_run,
+                    outputs={
+                        "request_id": request_id,
+                        "cache_hit": True,
+                        "is_multi_task": False,
+                        "failed_task_count": 0,
+                    },
+                )
+                yield {
+                    "type": "done",
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "answer": cache_response.answer,
+                    "citations": [c.model_dump() for c in cache_response.citations],
+                    "model": cache_response.model,
+                    "intent": cache_response.intent,
+                    "intent_confidence": cache_response.intent_confidence,
+                    "selected_tool": cache_response.selected_tool,
+                    "tool_confidence": cache_response.tool_confidence,
+                    "fallback_tool": cache_response.fallback_tool,
+                    "tool_selection_reason": cache_response.tool_selection_reason,
+                    "task_decomposed": cache_response.task_decomposed,
+                    "is_multi_task": cache_response.is_multi_task,
+                    "multi_task_results": cache_response.multi_task_results,
+                    "failed_tasks": cache_response.failed_tasks,
+                    "manual_intervention_required": cache_response.manual_intervention_required,
+                    "retry_count": cache_response.retry_count,
+                    "fallback_used": cache_response.fallback_used,
+                    "fallback_strategy": cache_response.fallback_strategy,
+                    "active_agent_id": cache_response.active_agent_id,
+                    "assigned_agent_ids": cache_response.assigned_agent_ids,
+                    "performance_metrics": cache_response.performance_metrics,
+                }
+                return
+            self.metrics_collector.record_cache_miss(request_id=request_id)
+            # 节点4 ：加载历史记忆
             history_scope = MemoryScope(
                 tenant_id=req.tenant_id,
                 user_id=req.user_id,
                 thread_id=req.thread_id,
             )
             memory_context = self.memory.load_context(history_scope, max_turns=5)
-            history_prompt_text = memory_context.as_prompt_text()
+            history_prompt_context = memory_context.as_prompt_text()
+            current_turn_count = memory_context.turn_count
+            logger.info("[%s] Memory loaded: turn_count=%d", request_id, current_turn_count)
             context = ""
             docs: list[dict[str, str]] = []
             citations: list[Citation] = []
+            # 节点5 ：RAG 检索
             if not self.is_query_time(req.query) and module_activation.get("rag", True):
                 docs = self.retriever.retrieve(
                     req.query,
                     top_k=settings.retrieval_final_k,
-                    history_text=history_prompt_text,
+                    history_text=history_prompt_context,
                     where=None,
                     parent_run=ask_run,
                 )
                 docs = docs[: settings.context_top_k]
                 context = "\n".join([f"[{d['source_id']}] {d['content']}" for d in docs])
                 citations = [Citation(source_id=d["source_id"], snippet=d["content"]) for d in docs]
+            # 节点6：智能体 ReAct 推理循环
             system_prompt = self._build_base_system_prompt(
                 context=context,
-                history_prompt_text=history_prompt_text,
+                history_prompt_text=history_prompt_context,
                 query=req.query,
-                mcp_tool_map={},
-                tool_selection=None,
+                mcp_tool_map=mcp_tool_map,
+                tool_selection=tool_selection,
             )
-            answer_parts: list[str] = []
-            for piece in self.model_client.stream_chat(
-                req.query,
-                system_prompt,
-                tools=[],
+            # 节点7：拆分任务
+            task_decomposition = self._decompose_task(
+                query=req.query,
+                intent_classification=intent_classification,
                 parent_run=ask_run,
-            ):
-                answer_parts.append(piece)
-                yield {
-                    "type": "token",
-                    "content": piece,
-                    "request_id": request_id,
-                    "trace_id": trace_id,
-                }
-            answer = "".join(answer_parts)
+            )
+            state.task_decomposition = task_decomposition
+            state.is_multi_task = len(task_decomposition.subtasks) > 1
+            if state.is_multi_task:
+                logger.info(
+                    "[%s] Multi-task detected: %d subtasks",
+                    request_id,
+                    len(task_decomposition.subtasks),
+                )
+                parallel_results = self._execute_decomposed_tasks(
+                    req_query=req.query,
+                    request_id=request_id,
+                    decomposition=task_decomposition,
+                    system_prompt=system_prompt,
+                    available_tools=available_tools,
+                    skill_map=SKILL_MAP,
+                    mcp_tool_map=mcp_tool_map,
+                    tool_selection=tool_selection,
+                    state=state,
+                    parent_run=ask_run,
+                )
+                state.parallel_task_results = parallel_results
+                state.failed_task_ids = parallel_results.failed_task_ids
+                answer = self._merge_multi_task_results(parallel_results)
+                tool_error_count = parallel_results.failed_tasks
+                for failed_task_id in parallel_results.failed_task_ids:
+                    dead_letter_queue.add(
+                        task_id=failed_task_id,
+                        payload={"request_id": request_id},
+                        failure_reason="parallel_task_execution_failed",
+                    )
+            else:
+                logger.info("[%s] Single-task mode", request_id)
+                # 根据工具选择结果重排序工具
+                if tool_selection and tool_selection.tool_name:
+                    # 将已选择的工具放在列表开头
+                    preferred_tools = next(
+                        (t for t in available_tools if t.get("name") == tool_selection.tool_name),
+                        None,
+                    )
+                    if preferred_tools:
+                        available_tools.remove(preferred_tools)
+                        available_tools.insert(0, preferred_tools)
+                        logger.info(
+                            "[%s] Preferred tool '%s' moved to the front of available tools",
+                            request_id,
+                            tool_selection.tool_name,
+                        )
+                answer = self._run_agent_loop(
+                    req.query,
+                    request_id,
+                    system_prompt,
+                    available_tools,
+                    SKILL_MAP,
+                    mcp_tool_map,
+                    state,
+                    tool_selection,
+                    parent_run=ask_run,
+                )
+                tool_error_count = state.tool_error_count
+                logger.info(
+                    "[%s] Agent loop finished: answer_len=%d tool_error_count=%d",
+                    request_id,
+                    len(answer or ""),
+                    tool_error_count,
+                )
             if not answer:
-                answer = "未能在限定轮次内生成最终答案。"
+                summary_prompt = (
+                    system_prompt
+                    + "\n\n请基于上面的知识库和工具结果，输出最终结论。"
+                    + "\n要求："
+                    + "\n1) 给出明确结论；"
+                    + "\n2) 如果工具失败或数据不足，明确说明不确定性；"
+                    + "\n3) 不要再调用任何工具。"
+                )
+                logger.info("Agent entering summary phase to generate final answer")
+                final_answer = self.model_client.chat(
+                    user_query=req.query,
+                    system_prompt=summary_prompt,
+                    tools=[],
+                    return_message=False,
+                    parent_run=ask_run,
+                    _token_counter=state.token_counter,  # ← 新增：传入 token 计数器
+                )
+                answer = str(final_answer or "").strip()
+            if not answer:
+                if tool_error_count > 0:
+                    answer = "部分数据工具调用失败，以下结论基于当前知识库与可用结果生成，建议稍后重试数据库查询。"
+                else:
+                    answer = "未能在限定轮次内生成最终答案。"
+
+
+
+
+
+
+
+                answer_parts: list[str] = []
+                for piece in self.model_client.stream_chat(
+                    req.query,
+                    system_prompt,
+                    tools=[],
+                    parent_run=ask_run,
+                ):
+                    answer_parts.append(piece)
+                    yield {
+                        "type": "token",
+                        "content": piece,
+                        "request_id": request_id,
+                        "trace_id": trace_id,
+                    }
+                answer = "".join(answer_parts)
+                if not answer:
+                    answer = "未能在限定轮次内生成最终答案。"
             yield {
                 "type": "done",
                 "request_id": request_id,
@@ -572,7 +762,7 @@ class ChatService:
                 if after_turn_count >= settings.memory_summary_update_turn_threshold:
                     logger.info("[%s] Updating long-term memory summary", request_id)
                     summary_text = self.build_memory_summary(
-                        history_prompt_text=history_prompt_text,
+                        history_prompt_text=history_prompt_context,
                         user_query=req.query,
                         answer=answer,
                         parent_run=ask_run,
@@ -1086,6 +1276,7 @@ class ChatService:
         self,
         query: str,
         intent_classification: IntentClassification,
+        tool_selection: ToolSelection | None = None,
         parent_run: RunTree | None = None,
     ) -> TaskDecomposition:
         """

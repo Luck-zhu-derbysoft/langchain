@@ -1,21 +1,25 @@
-import re
-from typing import Any, Iterator
-
-from attr import dataclass
-import psycopg
-from psycopg_pool import ConnectionPool
-from app.config.settings import settings
-import redis
-from psycopg import sql
 import json
+import re
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from typing import Any
+
+import psycopg
+import redis
+from attr import dataclass
+from psycopg import sql
+from psycopg_pool import ConnectionPool
+
+from app.config.settings import settings
+
 
 @dataclass(frozen=True)
 class MemoryScope:
     tenant_id: str
     user_id: str
     thread_id: str
+
 
 @dataclass
 class MemoryContext:
@@ -35,21 +39,31 @@ class MemoryContext:
             parts.append(f"近期对话:\n{recent_text}")
         return "\n\n".join(parts).strip()
 
+
 class PersistentConversationMemoryStore:
-    def load_context(self, scope: MemoryScope,*,max_turns: int) -> MemoryContext:
+    def load_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
         # 从 Redis 和 PostgreSQL 加载上下文
         # 1. 从 Redis 获取近期对话
         # 2. 从 PostgreSQL 获取长期记忆摘要
         # 3. 组合成 MemoryContext 返回
         raise NotImplementedError
-    def append_turn(self, scope: MemoryScope,*,
-                    role: str, content: str,
-                    metadata: dict[str, Any] | None = None,) -> None:
+
+    def append_turn(
+        self,
+        scope: MemoryScope,
+        *,
+        role: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         raise NotImplementedError
+
     def save_summary(self, scope: MemoryScope, summary: str) -> None:
         raise NotImplementedError
+
     def clear_memory(self, scope: MemoryScope) -> None:
         raise NotImplementedError
+
 
 class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
     def __init__(self) -> None:
@@ -83,7 +97,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 self._pg_pool.putconn(conn)  # ← 放回连接池
 
         def __del__(self) -> None:
-            if hasattr(self, '_pg_pool'):
+            if hasattr(self, "_pg_pool"):
                 self._pg_pool.closeall()
 
         self._ttl_days = settings.memory_ttl_days
@@ -160,12 +174,11 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                         LIMIT %s
                         """
                     ),
-                    (scope.tenant_id, scope.user_id, scope.thread_id, max_turns*2),
+                    (scope.tenant_id, scope.user_id, scope.thread_id, max_turns * 2),
                 )
-                recent_rows =list(reversed(cur.fetchall() or []))
+                recent_rows = list(reversed(cur.fetchall() or []))
             recent_turns = [
-                {"role": role, "content": self._sanitize(content)}
-                for role, content in recent_rows
+                {"role": role, "content": self._sanitize(content)} for role, content in recent_rows
             ]
 
             try:
@@ -175,17 +188,14 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                     "recent_turns": recent_turns,
                     "turn_count": turn_count,
                 }
-                self._redis_client.setex(
-                    scope_key, self._cache_ttl, json.dumps(cache_data)
-                )
+                self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
             except Exception:
                 pass
         return MemoryContext(summary=summary, recent_turns=recent_turns, turn_count=turn_count)
 
-    def append_turn(self, scope: MemoryScope,
-                     *, role: str,
-                     content: str,
-                     metadata: dict[str, Any] | None = None) -> None:
+    def append_turn(
+        self, scope: MemoryScope, *, role: str, content: str, metadata: dict[str, Any] | None = None
+    ) -> None:
         safe_content = self._sanitize(content) if self._redact_pii else content
         expires_at = datetime.utcnow() + timedelta(days=self._ttl_days)
         scope_key = self._scope_key(scope)
@@ -251,31 +261,28 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 turns = cache_data.get("recent_turns", [])
                 turns.append({"role": role, "content": safe_content})
                 if len(turns) > settings.cache_recent_turns_limit:  # 假设我们只缓存最近N轮对话
-                    turns = turns[-settings.cache_recent_turns_limit:]
+                    turns = turns[-settings.cache_recent_turns_limit :]
                 cache_data["recent_turns"] = turns
                 cache_data["turn_count"] = next_turn
-                self._redis_client.setex(
-                    scope_key, self._cache_ttl, json.dumps(cache_data)
-                )
+                self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
 
         except Exception:
-                pass
+            pass
 
     def save_summary(self, scope: MemoryScope, summary: str) -> None:
         safe_summary = self._sanitize(summary) if self._redact_pii else summary
-        with self._pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with self._pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     UPDATE conversation_memory_session
                     SET memory_summary = %s, last_message_at = NOW(), version = version + 1
                     WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
                     RETURNING turn_count
                     """,
-                    (safe_summary, scope.tenant_id, scope.user_id, scope.thread_id),
-                )
-                row = cur.fetchone()
-                turn_count = row[0] if row else 0
+                (safe_summary, scope.tenant_id, scope.user_id, scope.thread_id),
+            )
+            row = cur.fetchone()
+            turn_count = row[0] if row else 0
         # 更新 Redis 缓存（如果存在）
         scope_key = self._scope_key(scope)
         try:
@@ -284,48 +291,42 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 cache_data = json.loads(cached)
                 cache_data["summary"] = safe_summary
                 cache_data["turn_count"] = turn_count
-                self._redis_client.setex(
-                    scope_key, self._cache_ttl, json.dumps(cache_data)
-                )
+                self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
         except Exception:
-                pass
+            pass
 
     def clear_memory(self, scope: MemoryScope) -> None:
-        with self._pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with self._pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     UPDATE conversation_memory_session
                     SET status = 'deleted', last_message_at = NOW(), version = version + 1
                     WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
                     """,
-                    (scope.tenant_id, scope.user_id, scope.thread_id),
-                )
-                cur.execute(
-                    """
+                (scope.tenant_id, scope.user_id, scope.thread_id),
+            )
+            cur.execute(
+                """
                     UPDATE conversation_memory_turn
                     SET is_deleted = TRUE
                     WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
                     """,
-                    (scope.tenant_id, scope.user_id, scope.thread_id),
-                )
+                (scope.tenant_id, scope.user_id, scope.thread_id),
+            )
         # 删除 Redis 缓存
         scope_key = self._scope_key(scope)
         try:
             self._redis_client.delete(scope_key)
         except Exception:
-                pass
+            pass
 
-
-
-    def _sanitize(self,text:str) ->str:
+    def _sanitize(self, text: str) -> str:
         value = text or ""
         value = re.sub(
-                r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-                "[REDACTED_EMAIL]",
-                value,
-            )
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+            "[REDACTED_EMAIL]",
+            value,
+        )
         value = re.sub(r"1[3-9]\d{9}", "[REDACTED_PHONE]", value)
         value = re.sub(r"\b\d{15,18}[0-9Xx]?\b", "[REDACTED_ID]", value)
         return value
-
