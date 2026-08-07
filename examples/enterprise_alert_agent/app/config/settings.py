@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     pg_password: str = "postgres"
     pg_ssl_mode: str = "prefer"
     # --- MCP 配置 ---
-    mcp_service_url: str = "http://139.224.246.172:8080/sse"
+    mcp_service_url: str = "http://139.224.246.172:8080/mcp"
     mcp_enabled: bool = True
     mcp_api_key: str = ""
     mcp_cookie: str = ""

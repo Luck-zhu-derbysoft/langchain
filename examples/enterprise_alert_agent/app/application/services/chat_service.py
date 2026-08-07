@@ -42,7 +42,6 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
 from app.infrastructure.queue.dlq_handler import dead_letter_queue
 from app.infrastructure.skill.date.time_skill import TIME_SKILL_MAP
 from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta
-from app.infrastructure.skill.db.mysql_skill import MYSQL_TOOL_USER_PROMPT
 from app.observability.alert_manager import AlertManager
 from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.observability.langsmith_tracer import LangSmithTracer
@@ -790,8 +789,6 @@ class ChatService:
                     f"\n- 备用工具的调用顺序可根据实际情况灵活调整。"
                 )
 
-        if "query_mysql_database" in mcp_tool_map:
-            system_prompt += f"\nMySQL 工具使用规则:\n{MYSQL_TOOL_USER_PROMPT}"
         if settings.time_tool_enabled:
             system_prompt += (
                 "\n\n【硬规则】"

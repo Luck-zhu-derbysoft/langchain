@@ -46,6 +46,7 @@ def create_app() -> FastAPI:
     from app.api.routers.chat import router as chat_router
     from app.api.routers.health import router as health_router
     from app.api.routers.ingest import router as ingest_router
+
     app = FastAPI(
         title=settings.app_name,
         version="0.2.0",
@@ -62,10 +63,10 @@ def create_app() -> FastAPI:
         project_name=settings.langsmith_project,
         service_name="enterprise-alert-agent",
     )
-    embedding_client= EmbeddingClient(tracer=trace)
-    chroma_store= ChromaStore(embedding_client=embedding_client, tracer=trace)
+    embedding_client = EmbeddingClient(tracer=trace)
+    chroma_store = ChromaStore(embedding_client=embedding_client, tracer=trace)
     memory = RedisPostgresConversationMemoryStore()
-    retriever = Retriever(chroma_store=chroma_store,tracer=trace)
+    retriever = Retriever(chroma_store=chroma_store, tracer=trace)
     model_client = ModelClient(tracer=trace)
     fault_analyzer = FaultAnalyzer()
     intervention_handler = InterventionHandler()
@@ -94,7 +95,7 @@ def create_app() -> FastAPI:
             agent_id="sql_agent",
             display_name="SQL Agent",
             capabilities=["database_query"],
-            supported_tools=["query_mysql_database"],
+            supported_tools=[],
             priority=90,
         )
     )
@@ -135,14 +136,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RateLimitExceeded)
     async def rate_limit_handler(request, exc):
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "请求过于频繁，请稍后再试"}
-        )
+        return JSONResponse(status_code=429, content={"detail": "请求过于频繁，请稍后再试"})
 
     @app.on_event("startup")
     async def startup_checks() -> None:
         from app.infrastructure.mcp.mcp_client import async_init_mcp
+
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
         app.state.mcp_ready = False
