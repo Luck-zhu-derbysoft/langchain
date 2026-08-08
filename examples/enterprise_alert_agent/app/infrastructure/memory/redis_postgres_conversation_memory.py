@@ -2,12 +2,12 @@ import json
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
 import redis
-from attr import dataclass
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 
