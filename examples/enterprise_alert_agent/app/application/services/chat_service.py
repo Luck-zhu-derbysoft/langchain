@@ -1083,7 +1083,10 @@ class ChatService:
         available_tools: list[dict[str, Any]] = list(time_meta)
         mcp_tool_map: dict[str, SkillFunc] = {}
         mcp_tool_metadata: list = []
-        if settings.mcp_enabled and intent.get("mcp", True):
+        # 只要 MCP 已启用就把 MCP 工具并入可用工具集，不再依赖意图分类的
+        # need_db 开关（need_db=false 表示"无需查询业务库"，并不代表不需要
+        # MCP 工具；否则"MCP工具有哪些"这类元信息问题会看不到任何 RFP 工具）。
+        if settings.mcp_enabled:
             mcp_tool_map = get_tool_map()
             mcp_tool_metadata = get_tools_metadata()  # 确保 MCP 工具元数据已加载
             available_tools.extend(mcp_tool_metadata)
