@@ -1180,7 +1180,10 @@ class ChatService:
                 if tool_signature in state.previous_tool_calls:
                     error_msg = f"工具 '{tool_name}' 使用相同参数被重复调用，可能导致死循环。"
                     logger.warning("Repeated tool call detected: %s", tool_signature[:200])
-                    break  # 直接跳出工具调用循环，进入总结阶段
+                    # 进入只读总结模式：移除工具后让模型基于已获取的工具结果直接生成最终答案，
+                    # 避免外层循环继续以相同工具反复调用模型导致死循环。
+                    state.read_only_mode = True
+                    break  # 跳出工具调用循环，让模型进入总结阶段
                 state.previous_tool_calls.add(tool_signature)
 
                 logger.info("Agent calling tool: %s", tool_name)
