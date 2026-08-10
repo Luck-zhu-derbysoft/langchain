@@ -8,14 +8,16 @@
 
 from io import BytesIO
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from pypdf import PdfReader
 
 from app.application.services.ingest_service import IngestService
 from app.config.settings import settings
 from app.config.tracing_config import get_langsmith_client, is_langsmith_enabled
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
+from app.infrastructure.security.auth import TokenPayload, require_auth
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.schemas.ingest import IngestResponse, IngestTextRequest
@@ -42,7 +44,7 @@ def _parse_upload_to_text(file_name: str, content_bytes: bytes) -> str:
     suffix = Path(file_name).suffix.lower()
     # PDF、Word、Excel 等复杂格式的文件解析需要引入额外库，且可能存在安全风险，这里先限制为纯文本。
     if suffix == ".pdf":
-        reader = PdfReader(BytesIO(content_bytes))  # noqa: F821
+        reader = PdfReader(BytesIO(content_bytes))
         pages = [(page.extract_text() or "") for page in reader.pages]
         text = "\n".join(pages).strip()
         if not text:
@@ -59,7 +61,9 @@ def _parse_upload_to_text(file_name: str, content_bytes: bytes) -> str:
 
 
 @router.post("/text", response_model=IngestResponse)
-def ingest_text(req: IngestTextRequest) -> IngestResponse:
+def ingest_text(
+    req: IngestTextRequest, _auth: Annotated[TokenPayload, Depends(require_auth)]
+) -> IngestResponse:
     """接收纯文本并摄入向量库。
 
     请求示例:
@@ -85,7 +89,7 @@ def ingest_text(req: IngestTextRequest) -> IngestResponse:
 
 
 @router.get("/stats")
-def ingest_stats() -> dict[str, int]:
+def ingest_stats(_auth: Annotated[TokenPayload, Depends(require_auth)]) -> dict[str, int]:
     """查看当前向量库中的文档总数。"""
     root_run = _trace.start_root(
         name="api.ingest_stats",
@@ -105,6 +109,7 @@ def ingest_stats() -> dict[str, int]:
 @router.post("/file")
 async def ingest_file(
     file: UploadFile,
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
     source_id: str = Form(...),
     category: str = Form("文件导入"),
 ) -> IngestResponse:

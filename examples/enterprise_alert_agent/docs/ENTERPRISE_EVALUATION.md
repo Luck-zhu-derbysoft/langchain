@@ -8,30 +8,13 @@
 
 ## 目录
 
-1. [总体结论](#一总体结论)
-2. [成熟度评分表](#二成熟度评分表)
-3. [架构概览](#三架构概览)
-4. [P0 级问题（上线前必须修复）](#四p0-级问题上线前必须修复)
-5. [P1 级问题（生产化关键缺口）](#五p1-级问题生产化关键缺口)
-6. [P2 级问题（打磨完善项）](#六p2-级问题打磨完善项)
-7. [系统优点（应保留的资产）](#七系统优点应保留的资产)
-8. [分模块审计明细](#八分模块审计明细)
-9. [升级路线图（分阶段执行清单）](#九升级路线图分阶段执行清单)
-10. [修复示例（P0 安全三项）](#十修复示例p0-安全三项)
-
----
-
 ## 一、总体结论
 
 **定位：这是一个架构清晰、方向正确的高质量「原型/Demo」，但离「企业级生产可用」还有明显差距。**
 
 - **做得好的地方**：分层架构规范（`api → application → infrastructure → observability`）、LangSmith 全链路追踪纪律、多 Agent 编排与注册表+熔断、故障诊断与告警、双级记忆（Redis+PG）、任务分解并行执行、PII 脱敏、JWT/RBAC 脚手架——这些组件确实存在且大多可运行。
 - **致命短板**：认证体系可被零成本绕过、生产密钥硬编码在代码里、存在真实的多线程/异步 Bug、审计与指标只存内存、测试近乎为零。
-
-> ⚠️ **当前系统不得直接暴露到公网或生产环境。**
-
----
-
+  
 ## 二、成熟度评分表
 
 | 维度 | 评分 | 一句话 |
@@ -79,18 +62,10 @@ flowchart TB
         TRC["LangSmithTracer"]
         MET["MetricsCollector"]
         ALM["AlertManager"]
-    end
-    CHAT --> CS
-    ING --> IS
-    CS --> ORC & MEM & VEC & LLM & MCP & DLQ & INT
-    CS --> TRC & MET & ALM
-    ADM --> AUD
-    IS --> VEC
-```
+
 
 **技术栈**：Python 3.11+ / FastAPI / Pydantic v2 / OpenAI SDK（DashScope 兼容 `qwen-plus` / `qwen-turbo`）/ ChromaDB / Redis / PostgreSQL（psycopg3）/ LangSmith / slowapi / PyJWT / MCP SDK / 线程池多 Agent 编排。
 
----
 
 ## 四、P0 级问题（上线前必须修复）
 

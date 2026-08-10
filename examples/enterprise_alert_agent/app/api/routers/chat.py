@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from app.application.services.chat_service import ChatService
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest
 from app.infrastructure.memory.redis_postgres_conversation_memory import MemoryScope
+from app.infrastructure.security.auth import TokenPayload, require_auth
 from app.main import limiter
 from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.schemas.chat import ChatRequest, ClearRequest
@@ -34,7 +35,10 @@ def _get_chat_service(request: Request) -> ChatService:
 @router.post("/stream")
 @limiter.limit("10/minute")
 def chat_stream(
-    request: Request, req: ChatRequest, service: Annotated[ChatService, Depends(_get_chat_service)]
+    request: Request,
+    req: ChatRequest,
+    service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
 ) -> StreamingResponse:
     root_run = service.trace.start_root(
         name="api.chat.stream",
@@ -71,7 +75,10 @@ def chat_stream(
 
 @router.post("/memory/clear")
 def clear_memory(
-    request: Request, req: ClearRequest, service: Annotated[ChatService, Depends(_get_chat_service)]
+    request: Request,
+    req: ClearRequest,
+    service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
 ) -> dict[str, str]:
     scope = MemoryScope(
         tenant_id=req.tenant_id,
@@ -84,7 +91,9 @@ def clear_memory(
 
 @router.get("/{request_id}/pending-intervention")
 async def get_pending_intervention(
-    request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]
+    request_id: str,
+    service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
 ):
     """
     获取正在等待用户干预的请求
@@ -110,6 +119,7 @@ async def submit_intervention(
     request_id: str,
     intervention: ManualInterventionRequest,
     service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
 ):
     """
     提交人工干预请求
@@ -145,7 +155,9 @@ async def submit_intervention(
 
 @router.get("/{request_id}/intervention-history")
 async def get_intervention_history(
-    request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]
+    request_id: str,
+    service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
 ):
     """获取该请求的所有干预历史"""
     history = service._intervention_handler.get_intervention_history(request_id)
@@ -159,6 +171,7 @@ async def get_intervention_history(
 @router.get("/alerts")
 async def get_alerts(
     service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
     alert_type: str | None = None,
     severity: str | None = None,
     limit: int = 100,
@@ -189,7 +202,10 @@ async def get_alerts(
 
 @router.post("/alerts/{alert_id}/acknowledge")
 async def acknowledge_alert(
-    alert_id: str, acknowledged_by: str, service: Annotated[ChatService, Depends(_get_chat_service)]
+    alert_id: str,
+    acknowledged_by: str,
+    service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
 ):
     """确认告警"""
     success = service.alert_manager.acknowledge_alert(alert_id, acknowledged_by)
@@ -199,7 +215,11 @@ async def acknowledge_alert(
 
 
 @router.get("/metrics/{request_id}")
-async def get_metrics(request_id: str, service: Annotated[ChatService, Depends(_get_chat_service)]):
+async def get_metrics(
+    request_id: str,
+    service: Annotated[ChatService, Depends(_get_chat_service)],
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
+):
     """获取该请求的性能指标"""
     metrics = service.metrics_collector.get_metrics(request_id)
     if not metrics:
