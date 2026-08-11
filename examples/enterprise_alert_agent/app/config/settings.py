@@ -1,3 +1,5 @@
+import sys
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,7 +10,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
-    dashscope_api_key: str = "DASHSCOPE_API_KEY"
+    dashscope_api_key: str = ""
     model_name: str = "qwen-plus"
     fallback_model_name: str = "qwen-turbo"  # 主模型失败后的降级模型
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -42,7 +44,7 @@ class Settings(BaseSettings):
     # ============== 新增：LangSmith 配置（3行） ==============
     # --- LangSmith 配置 ---
     langsmith_tracing: bool = True
-    langsmith_api_key: str = "LANGSMITH_API_KEY"
+    langsmith_api_key: str = ""
     langsmith_project: str = "enterprise-alert-agent"
     # ================================================
 
@@ -63,11 +65,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     # mysql数据库配置
-    mysql_host: str = "139.224.246.172"
+    mysql_host: str = ""
     mysql_port: int = 3306
     mysql_db: str = "agent"
     mysql_user: str = "root"
-    mysql_password: str = "MyPass_2026_secure"
+    mysql_password: str = ""
     sql_max_rows: int = 200
     sql_query_timeout_seconds: int = 5
     # 混合检索配置
@@ -83,24 +85,24 @@ class Settings(BaseSettings):
     time_query_skip_retrieval: bool = True
     time_query_skip_memory_write: bool = True
     # redis配置
-    redis_host: str = "139.224.246.172"
+    redis_host: str = ""
     redis_port: int = 6379
     redis_db: int = 0
-    redis_password: str = "MyRedisPass123!"
+    redis_password: str = ""
     memory_redact_pii: bool = True
     memory_ttl_days: int = 7
     redis_cache_ttl_seconds: int = 3600
     memory_summary_update_turn_threshold: int = 5
     cache_recent_turns_limit: int = 10
     # PostgreSQL 配置（替代 MySQL）
-    pg_host: str = "139.224.246.172"
+    pg_host: str = ""
     pg_port: int = 5432
     pg_db: str = "postgres"
     pg_user: str = "postgres"
-    pg_password: str = "postgres"
+    pg_password: str = ""
     pg_ssl_mode: str = "prefer"
     # --- MCP 配置 ---
-    mcp_service_url: str = "http://139.224.246.172:8080/mcp"
+    mcp_service_url: str = ""
     mcp_enabled: bool = True
     mcp_api_key: str = ""
     mcp_cookie: str = ""
@@ -120,4 +122,25 @@ class Settings(BaseSettings):
     admin_api_key: str = ""
 
 
+def _validate_secrets(s: "Settings") -> None:
+    # fail fast if any required secret is missing
+    required = {
+        "DASHSCOPE_API_KEY": s.dashscope_api_key,
+        "ADMIN_JWT_SECRET": s.admin_jwt_secret,
+        "MYSQL_PASSWORD": s.mysql_password,
+        "REDIS_PASSWORD": s.redis_password,
+        "PG_PASSWORD": s.pg_password,
+    }
+    missing = [k for k, v in required.items() if not v]
+    if missing:
+        print(
+            f"[FATAL] Missing required secrets: {missing}. "
+            "Set them via environment variables or .env file.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 settings = Settings()
+_validate_secrets(settings)
+_validate_secrets(settings)

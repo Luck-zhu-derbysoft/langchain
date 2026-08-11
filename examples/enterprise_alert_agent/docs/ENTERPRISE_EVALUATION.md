@@ -69,7 +69,7 @@ flowchart TB
 
 ## 四、P0 级问题（上线前必须修复）
 
-### 4.1 认证体系可被完全绕过 🔴
+### 4.1 认证体系可被完全绕过 (已修复)
 
 | 项 | 说明 |
 |---|---|
@@ -291,69 +291,6 @@ flowchart TB
 
 ---
 
-## 十、修复示例（P0 安全三项）
-
-### 10.1 令牌签发加凭证（示意）
-
-```python
-# app/api/routers/admin.py
-class TokenRequest(BaseModel):
-    user_id: str
-    password: str   # 新增：必须提供凭证
-    role: Role = Role.OPERATOR   # 默认低权限
-
-@router.post("/token")
-async def create_token(request: TokenRequest):
-    if not verify_credentials(request.user_id, request.password, request.role):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_access_token(request.user_id, request.role)
-    return {"token": token}
-```
-
-### 10.2 密钥强制环境变量（示意）
-
-```python
-# app/config/settings.py
-from pydantic import SecretStr, field_validator
-
-class Settings(BaseSettings):
-    admin_jwt_secret: SecretStr = SecretStr("")   # 空默认，强制注入
-    # mysql_password / redis_password / pg_password 同理
-
-    @field_validator("admin_jwt_secret", mode="before")
-    @classmethod
-    def _require_secret(cls, v):
-        if not v:
-            raise ValueError("admin_jwt_secret 必须通过环境变量注入，禁止使用默认值")
-        return v
-```
-
-### 10.3 告警线程安全分发（示意）
-
-```python
-# app/observability/alert_manager.py
-import threading, queue
-
-class AlertManager:
-    def __init__(self) -> None:
-        ...
-        self._dispatch_queue: queue.Queue[Alert] = queue.Queue()
-        self._worker = threading.Thread(target=self._dispatch_loop, daemon=True)
-        self._worker.start()
-
-    def _dispatch_loop(self) -> None:
-        while True:
-            alert = self._dispatch_queue.get()
-            # 用 asyncio.run 在独立线程中驱动异步分发，或直接调用同步通知实现
-            self._dispatch_sync(alert)
-
-    def create_alert(self, ...) -> Alert:
-        ...
-        self._dispatch_queue.put(alert)   # 线程安全，替换 asyncio.create_task
-        return alert
-```
-
----
 
 ## 附：关键文件索引
 
