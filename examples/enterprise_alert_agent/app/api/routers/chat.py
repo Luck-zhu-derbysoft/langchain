@@ -90,6 +90,7 @@ def clear_memory(
 
 
 @router.get("/{request_id}/pending-intervention")
+@limiter.limit("5/minute")
 async def get_pending_intervention(
     request_id: str,
     service: Annotated[ChatService, Depends(_get_chat_service)],
@@ -115,6 +116,7 @@ async def get_pending_intervention(
 
 
 @router.post("/{request_id}/intervention")
+@limiter.limit("10/minute")
 async def submit_intervention(
     request_id: str,
     intervention: ManualInterventionRequest,
@@ -154,6 +156,7 @@ async def submit_intervention(
 
 
 @router.get("/{request_id}/intervention-history")
+@limiter.limit("10/minute")
 async def get_intervention_history(
     request_id: str,
     service: Annotated[ChatService, Depends(_get_chat_service)],
@@ -169,6 +172,7 @@ async def get_intervention_history(
 
 
 @router.get("/alerts")
+@limiter.limit("20/minute")
 async def get_alerts(
     service: Annotated[ChatService, Depends(_get_chat_service)],
     _auth: Annotated[TokenPayload, Depends(require_auth)],
@@ -201,6 +205,7 @@ async def get_alerts(
 
 
 @router.post("/alerts/{alert_id}/acknowledge")
+@limiter.limit("30/minute")
 async def acknowledge_alert(
     alert_id: str,
     acknowledged_by: str,

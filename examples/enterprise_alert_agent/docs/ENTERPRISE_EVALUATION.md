@@ -89,9 +89,8 @@ flowchart TB
 
 > 附：`admin_jwt_exp_minutes` 在 settings 中已定义但从未使用，`create_access_token` 内写死 15 分钟。
 
-根据文档内容，修复4.3 生产密钥硬编码在代码中的问题。给出对比修改的代码，我手动修复
 
-### 4.3 真实的多线程异步 Bug 🔴
+### 4.3 真实的多线程异步 Bug (已修复)
 
 | 项 | 说明 |
 |---|---|
@@ -101,7 +100,7 @@ flowchart TB
 | 修复方向 | ① 用「线程安全队列 + 独立分发线程」或 `run_coroutine_threadsafe` 替代 `asyncio.create_task`；② 接入真实通知渠道或先落库 |
 
 ---
-
+根据文档内容，修复五、P1 级问题3 | **限流** 。给出对比修改的代码，我手动修复
 ## 五、P1 级问题（生产化关键缺口）
 
 | # | 领域 | 问题 | 位置 |
@@ -251,14 +250,14 @@ flowchart TB
 
 ## 九、升级路线图（分阶段执行清单）
 
-### 阶段 0：安全止血（P0，1 周内）
-
+### 阶段 0：安全止血（P0，1 周内）8.11-8.11
 - [ ] **4.1** `/admin/token` 接入真实凭证（密码哈希 + 校验；或改用 API Key）
 - [ ] **4.1** 聊天/摄入/健康接口统一接入认证（可选：内网白名单 + TrustedHost）
 - [ ] **4.2** `settings.py` 全部密钥默认值清空，强制环境变量读取，缺失即启动失败
 - [ ] **4.2** 项目根添加 `.gitignore`（`.env`、`data/chroma_db/`、`*.sqlite3`、`__pycache__/`、`.venv/`）
 - [ ] **4.2** 添加 `.env.example`；轮换已泄露的 DB/Redis/JWT 密钥
 - [ ] **4.3** 修复 `AlertManager` 线程分发 Bug（线程安全队列 / `run_coroutine_threadsafe`）
+
 
 ### 阶段 1：生产能力（P1，2~3 周）
 

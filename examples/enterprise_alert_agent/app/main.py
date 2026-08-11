@@ -35,9 +35,28 @@ from app.observability.langsmith_tracer import LangSmithTracer
 from app.observability.metrics import MetricsCollector
 from app.rag.retrieval.retriever import Retriever
 
-limiter = Limiter(key_func=get_remote_address)
+
+def get_user_rate_limit_key(request) -> str:
+    """按用户/租户维度限流，降级回 IP。"""
+    try:
+        # 尝试从 Authorization token 中提取用户标识
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            # 简化：用 token 前 20 字符作为用户 key
+            return f"user:{token[:20]}"
+    except:
+        pass
+    # 降级为 IP 限流
+    return f"ip:{get_remote_address(request)}"
+
+
+limiter = Limiter(key_func=get_user_rate_limit_key)
 
 logger = logging.getLogger(__name__)
+
+
+limiter = Limiter(key_func=get_user_rate_limit_key)
 
 
 def create_app() -> FastAPI:

@@ -19,10 +19,14 @@ from app.config.tracing_config import get_langsmith_client, is_langsmith_enabled
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
 from app.infrastructure.security.auth import TokenPayload, require_auth
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
+from app.main import limiter
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.schemas.ingest import IngestResponse, IngestTextRequest
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
+
+MAX_INGEST_TEXT_SIZE = 1 * 1024 * 1024  # 1MB
+MAX_INGEST_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 # 初始化依赖链：EmbeddingClient → ChromaStore → IngestService
 _trace = LangSmithTracer(
@@ -61,6 +65,7 @@ def _parse_upload_to_text(file_name: str, content_bytes: bytes) -> str:
 
 
 @router.post("/text", response_model=IngestResponse)
+@limiter.limit("5/minute")
 def ingest_text(
     req: IngestTextRequest, _auth: Annotated[TokenPayload, Depends(require_auth)]
 ) -> IngestResponse:
@@ -73,6 +78,10 @@ def ingest_text(
         "metadata": {"category": "告警规则"}
     }
     """
+    if len(req.content) > MAX_INGEST_TEXT_SIZE:
+        raise HTTPException(
+            status_code=413, detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit"
+        )
     root_run = _trace.start_root(
         name="api.ingest_text",
         run_type="chain",
@@ -89,6 +98,7 @@ def ingest_text(
 
 
 @router.get("/stats")
+@limiter.limit("10/minute")
 def ingest_stats(_auth: Annotated[TokenPayload, Depends(require_auth)]) -> dict[str, int]:
     """查看当前向量库中的文档总数。"""
     root_run = _trace.start_root(
@@ -107,6 +117,7 @@ def ingest_stats(_auth: Annotated[TokenPayload, Depends(require_auth)]) -> dict[
 
 
 @router.post("/file")
+@limiter.limit("5/minute")
 async def ingest_file(
     file: UploadFile,
     _auth: Annotated[TokenPayload, Depends(require_auth)],
@@ -124,7 +135,11 @@ async def ingest_file(
     try:
         content_bytes = await file.read()
         if not content_bytes:
-            raise HTTPException(status_code=400, detail="上传文件内容为空")
+            raise HTTPException(status_code=413, detail="上传文件内容为空")
+        if len(content_bytes) > MAX_INGEST_FILE_SIZE:
+            raise HTTPException(
+                status_code=413, detail=f"File exceeds {MAX_INGEST_FILE_SIZE / 1024 / 1024}MB limit"
+            )
         content_str = _parse_upload_to_text(file_name, content_bytes)
         resolved_source_id = source_id.strip() or Path(file_name).stem
         ingest_req = IngestTextRequest(

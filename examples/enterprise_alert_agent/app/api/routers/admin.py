@@ -13,6 +13,7 @@ from app.infrastructure.security.auth import (
     require_roles,
     verify_api_key,
 )
+from app.main import limiter
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -24,6 +25,7 @@ class TokenRequest(BaseModel):
 
 
 @router.post("/token")
+@limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def create_token(request: TokenRequest):
     if not verify_api_key(request.user_id, request.api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -32,6 +34,7 @@ async def create_token(request: TokenRequest):
 
 
 @router.post("/config/{key}")
+@limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def update_config(
     key: str,
     value: Any,
@@ -71,22 +74,26 @@ async def update_config(
 
 
 @router.get("/config")
+@limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def get_all_configs(current_user: TokenPayload = Depends(require_roles(Role.ADMIN))):
     return _dynamic_settings.get_all_overrides()
 
 
 @router.get("/config/{key}")
+@limiter.limit("30/minute")  # 限制每分钟最多请求次数
 async def get_config(
     key: str,
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.OPERATOR, Role.AUDITOR)),
 ):
-    value = _dynamic_settings.get(key)
-    if value is None:
-        raise HTTPException(status_code=404, detail=f"Config for key '{key}' not found")
-    return {"key": key, "value": value}
+    try:
+        value = _dynamic_settings.get(key)
+        return {"key": key, "value": value}
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Config key not found: {key}")
 
 
 @router.post("/config/{key}/reset")
+@limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def reset_config(
     key: str,
     user_id: str = "system",
@@ -122,6 +129,7 @@ async def reset_config(
 
 
 @router.get("/config/history")
+@limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def get_config_change_history(
     limit: int = 50,
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.OPERATOR, Role.AUDITOR)),
