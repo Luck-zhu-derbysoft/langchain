@@ -118,7 +118,6 @@ class Settings(BaseSettings):
     # ========== 安全配置==========
     admin_jwt_secret: str = ""
     admin_jwt_algorithm: str = "HS256"
-    admin_jwt_exp_minutes: int = 120
     admin_api_key: str = ""
 
 
