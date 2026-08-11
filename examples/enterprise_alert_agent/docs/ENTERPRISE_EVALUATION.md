@@ -89,6 +89,8 @@ flowchart TB
 
 > 附：`admin_jwt_exp_minutes` 在 settings 中已定义但从未使用，`create_access_token` 内写死 15 分钟。
 
+根据文档内容，修复4.3 生产密钥硬编码在代码中的问题。给出对比修改的代码，我手动修复
+
 ### 4.3 真实的多线程异步 Bug 🔴
 
 | 项 | 说明 |
