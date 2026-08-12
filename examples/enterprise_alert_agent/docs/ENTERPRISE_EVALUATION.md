@@ -112,7 +112,7 @@ flowchart TB
 | 5 | **连接管理**(已修复) | PG `ConnectionPool` 是死代码：`_pg_conn` 每次操作新建连接后关闭；Redis 所有操作 `except Exception: pass` 静默失败 | `app/infrastructure/memory/redis_postgres_conversation_memory.py` |
 | 6 | **DLQ 只写不读**(已修复) | `dead_letter_queue.add()` 有调用，但 `retry()/list_pending()/stats()` 没有任何路由或后台 Worker 触发 → DLQ 实际是「只写」的黑洞 | `app/infrastructure/queue/dlq_handler.py` |
 | 7 | **人机协同未接线** (已修复)| 人工干预只有手动 API 可触达；`chat_service` 中 `manual_intervention_required` 恒为 `False`；`create_intervention_request()` 从未被调用；`execute_intervention()` 未真正接线回调；`finally` 块无条件把结果写成 `success=False` 覆盖真实结果 | `app/infrastructure/agent/intervention_handler.py` |
-| 8 | **动态配置部分失效** | `ChatService.__init__` 从 `ConfigManager` 读取，但 `_run_agent_loop`/`_execute_decomposed_tasks` 内部直接读 `settings.*` → 管理端改了这些 key 不生效；`DynamicSettings` 无锁、无持久化、value 无校验；`/admin/config/{key}` 无 key 白名单 | `app/application/services/chat_service.py`、`app/config/dynamic_settings.py`、`app/api/routers/admin.py` |
+| 8 | **动态配置部分失效** (已修复)| `ChatService.__init__` 从 `ConfigManager` 读取，但 `_run_agent_loop`/`_execute_decomposed_tasks` 内部直接读 `settings.*` → 管理端改了这些 key 不生效；`DynamicSettings` 无锁、无持久化、value 无校验；`/admin/config/{key}` 无 key 白名单 | `app/application/services/chat_service.py`、`app/config/dynamic_settings.py`、`app/api/routers/admin.py` |
 | 9 | **资源边界** | `MetricsCollector` 无界增长（内存泄漏）、无锁（多线程写竞争）；`get_summary` 忽略 `request_id` 聚合所有数据；`/ingest` 对 `content` 与上传文件**无大小限制**（DoS 面）；`BudgetExceededError` 未被捕获 → 落入 500 | `app/observability/metrics.py`、`app/api/routers/ingest.py`、`app/infrastructure/llm/model_client.py` |
 | 10 | **线程安全** | `AgentRegistry`、`Retriever` 缓存、`MetricsCollector`、`InterventionHandler`、`DynamicSettings` 在并行任务线程中被并发读写却无锁 | 多处 |
 
@@ -259,7 +259,7 @@ flowchart TB
 - [ ] **4.3** 修复 `AlertManager` 线程分发 Bug（线程安全队列 / `run_coroutine_threadsafe`）
 
 
-### 阶段 1：生产能力（P1，2~3 周）
+### 阶段 1：生产能力（P1，2~3 周）8.12-
 
 - [ ] **P1-1** 审计落盘：`audit.jsonl` 改为真正的 append-only 追加写；全动作埋点（chat/intervention/login/permission）；detail 脱敏
 - [ ] **P1-2** 测试：补单元测试（mock 模型/DB）；集成测试接入 Testcontainers/本地模拟；配置 CI（GitHub Actions）

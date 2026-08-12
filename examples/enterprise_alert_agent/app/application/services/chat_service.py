@@ -472,7 +472,8 @@ class ChatService:
                     "skipped_task_ids": state.parallel_task_results.skipped_task_ids,
                 },
                 failed_tasks=state.failed_task_ids,
-                manual_intervention_required=len(state.failed_task_ids) >= settings.agent_tool_failure_threshold,
+                manual_intervention_required=len(state.failed_task_ids)
+                >= settings.agent_tool_failure_threshold,
                 retry_count=state.retry_count,
                 fallback_used=state.fallback_used,
                 fallback_strategy=state.fallback_strategy,
@@ -797,11 +798,11 @@ class ChatService:
         parent_run: RunTree | None = None,
     ) -> str:
         answer = ""
-        for iteration in range(settings.agent_max_iterations):
+        for iteration in range(self.config_manager.get_agent_max_iterations()):
             logger.info(
                 "Agent iteration %d/%d (read_only=%s)",
                 iteration + 1,
-                settings.agent_max_iterations,
+                self.config_manager.get_agent_max_iterations(),
                 state.read_only_mode,
             )
             response_message = self.model_client.chat(
@@ -880,7 +881,8 @@ class ChatService:
                     if (
                         tool_selection
                         and tool_selection.fallback_tools
-                        and len(state.previous_tool_calls) < settings.agent_max_iterations
+                        and len(state.previous_tool_calls)
+                        < self.config_manager.get_agent_max_iterations()
                     ):
                         logger.info("Attempting fallback tools: %s", tool_selection.fallback_tools)
                         for backup_tool in tool_selection.fallback_tools:
@@ -905,7 +907,7 @@ class ChatService:
                                 )
                                 continue
 
-                    if state.tool_error_count >= settings.agent_tool_failure_threshold:
+                    if state.tool_error_count >= self.config_manager.get_tool_failure_threshold():
                         state.read_only_mode = True
                         logger.warning("Tool failure threshold reached, forcing summary phase")
                         break
@@ -1133,12 +1135,12 @@ class ChatService:
                 subtask.assigned_agent_id,
             )
 
-            for attempt in range(settings.task_max_retries):
-                if time.perf_counter() - task_started > settings.task_timeout_seconds:
+            for attempt in range(self.config_manager.get_agent_max_iterations()):
+                if time.perf_counter() - task_started > self.config_manager.get_task_timeout():
                     logger.warning(
                         "Subtask %s timed out after %d seconds",
                         subtask.task_id,
-                        settings.task_timeout_seconds,
+                        self.config_manager.get_task_timeout(),
                     )
                     task_result = (
                         subtask.task_id,
@@ -1206,7 +1208,7 @@ class ChatService:
                     )
 
                     if (
-                        settings.enable_fallback_chain
+                        self.config_manager.get_enable_fallback_chain()
                         and tool_selection
                         and tool_selection.fallback_tools
                     ):
@@ -1309,13 +1311,13 @@ class ChatService:
                             backoff_time = 1
                         else:
                             break  # 不再重试
-                        if attempt + 1 < settings.task_max_retries:
+                        if attempt + 1 < self.config_manager.get_task_max_retries():
                             logger.info(
                                 "Subtask %s will retry after %.2f seconds (attempt %d/%d) based on fault diagnosis",
                                 subtask.task_id,
                                 backoff_time,
                                 attempt + 1,
-                                settings.task_max_retries,
+                                self.config_manager.get_task_max_retries(),
                             )
                         time.sleep(backoff_time)
 
@@ -1349,7 +1351,7 @@ class ChatService:
                 continue
 
             max_workers = min(
-                max(len(decomposition.subtasks), 1), settings.task_max_workers
+                max(len(decomposition.subtasks), 1), self.config_manager.get_task_max_workers()
             )  # 限制最大并行数为 4
             # 创建线程池执行所有子任务
             with ThreadPoolExecutor(max_workers=max_workers) as executor:

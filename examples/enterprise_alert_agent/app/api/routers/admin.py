@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.config.dynamic_settings import _dynamic_settings
+from app.config.dynamic_settings import ALLOWED_CONFIG_KEYS, _dynamic_settings
 from app.infrastructure.audit.audit_logger import AuditAction, AuditResult, audit_logger
 from app.infrastructure.queue.dlq_handler import dead_letter_queue
 from app.infrastructure.security.auth import (
@@ -43,6 +43,8 @@ async def update_config(
     user_id: str = "system",
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.OPERATOR, Role.AUDITOR)),
 ):
+    if key not in ALLOWED_CONFIG_KEYS:
+        raise HTTPException(status_code=404, detail=f"Config key not found: {key}")
     try:
         success = _dynamic_settings.set(key, value, user_id=user_id)
 
@@ -61,7 +63,7 @@ async def update_config(
             "success": True,
             "key": key,
             "value": value,
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "timestamp": datetime.now(tz=UTC).isoformat(),
         }
     except Exception as exc:
         audit_logger.log(
