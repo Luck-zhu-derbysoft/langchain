@@ -107,8 +107,8 @@ flowchart TB
 |---|---|---|---|
 | 1 | **审计合规** | 审计记录基本只存内存（上限 1 万条），`audit.jsonl` 仅在内存溢出瞬间写一条；`CHAT_REQUEST/INTERVENTION/LOGIN` 动作定义了但从未上报；配置变更日志记录 `new_value`（可能含密钥） | `app/infrastructure/audit/audit_logger.py` |
 | 2 | **测试** | 仅 `tests/integration/test_chat_api.py` 一个文件，全部调用**真实付费 DashScope API**，且写污染真实 Chroma/Redis/PG，无清理；零单元测试；无 CI | `tests/` |
-| 3 | **限流** | 仅 `/chat/stream` 有 10 次/分钟/IP 限流；`/ingest`（上传文件）、`/admin`、干预接口全部无限制；按 IP 而非按用户/租户 | `app/api/routers/chat.py:35` |
-| 4 | **多租户** | `tenant_id/user_id/thread_id` 均有默认值 `"default-*"`；检索、记忆、缓存均无强制租户隔离参数 → 多租户边界纯属「建议性」 | `app/schemas/chat.py` |
+| 3 (已修复)| **限流** | 仅 `/chat/stream` 有 10 次/分钟/IP 限流；`/ingest`（上传文件）、`/admin`、干预接口全部无限制；按 IP 而非按用户/租户 | `app/api/routers/chat.py:35` |
+| 4 | **多租户**(已修复) | `tenant_id/user_id/thread_id` 均有默认值 `"default-*"`；检索、记忆、缓存均无强制租户隔离参数 → 多租户边界纯属「建议性」 | `app/schemas/chat.py` |
 | 5 | **连接管理** | PG `ConnectionPool` 是死代码：`_pg_conn` 每次操作新建连接后关闭；Redis 所有操作 `except Exception: pass` 静默失败 | `app/infrastructure/memory/redis_postgres_conversation_memory.py` |
 | 6 | **DLQ 只写不读** | `dead_letter_queue.add()` 有调用，但 `retry()/list_pending()/stats()` 没有任何路由或后台 Worker 触发 → DLQ 实际是「只写」的黑洞 | `app/infrastructure/queue/dlq_handler.py` |
 | 7 | **人机协同未接线** | 人工干预只有手动 API 可触达；`chat_service` 中 `manual_intervention_required` 恒为 `False`；`create_intervention_request()` 从未被调用；`execute_intervention()` 未真正接线回调；`finally` 块无条件把结果写成 `success=False` 覆盖真实结果 | `app/infrastructure/agent/intervention_handler.py` |

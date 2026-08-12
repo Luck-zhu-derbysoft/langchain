@@ -40,6 +40,8 @@ def chat_stream(
     service: Annotated[ChatService, Depends(_get_chat_service)],
     _auth: Annotated[TokenPayload, Depends(require_auth)],
 ) -> StreamingResponse:
+    req.tenant_id = _auth.tenant_id
+    req.user_id = _auth.sub
     root_run = service.trace.start_root(
         name="api.chat.stream",
         run_type="chain",
@@ -80,6 +82,8 @@ def clear_memory(
     service: Annotated[ChatService, Depends(_get_chat_service)],
     _auth: Annotated[TokenPayload, Depends(require_auth)],
 ) -> dict[str, str]:
+    req.tenant_id = _auth.tenant_id
+    req.user_id = _auth.sub
     scope = MemoryScope(
         tenant_id=req.tenant_id,
         user_id=req.user_id,

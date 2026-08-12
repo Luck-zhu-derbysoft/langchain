@@ -2,7 +2,7 @@ import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config.dynamic_settings import _dynamic_settings
 from app.infrastructure.audit.audit_logger import AuditAction, AuditResult, audit_logger
@@ -22,6 +22,7 @@ class TokenRequest(BaseModel):
     user_id: str
     role: Role = Role.OPERATOR
     api_key: str
+    tenant_id: str = Field(..., min_length=1, description="租户 ID，写入 JWT")
 
 
 @router.post("/token")
@@ -29,7 +30,7 @@ class TokenRequest(BaseModel):
 async def create_token(request: TokenRequest):
     if not verify_api_key(request.user_id, request.api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
-    token = create_access_token(request.user_id, request.role)
+    token = create_access_token(request.user_id, request.role, request.tenant_id)
     return {"token": token}
 
 
@@ -50,7 +51,7 @@ async def update_config(
             action=AuditAction.CONFIG_CHANGE,
             user_id=current_user.sub,
             result=AuditResult.SUCCESS,
-            tenant_id="default",
+            tenant_id=current_user.tenant_id,
             resource=f"/admin/config/{key}",
             detail={"new_value": value, "operator_user_id": user_id},
         )
@@ -66,7 +67,7 @@ async def update_config(
             action=AuditAction.CONFIG_CHANGE,
             user_id=current_user.sub,
             result=AuditResult.FAILURE,
-            tenant_id="default",
+            tenant_id=current_user.tenant_id,
             resource=f"/admin/config/{key}",
             detail={"error": str(exc), "operator_user_id": user_id},
         )
@@ -88,7 +89,7 @@ async def get_config(
     try:
         value = _dynamic_settings.get(key)
         return {"key": key, "value": value}
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=404, detail=f"Config key not found: {key}")
 
 
@@ -107,7 +108,7 @@ async def reset_config(
             action=AuditAction.CONFIG_CHANGE,
             user_id=current_user.sub,
             result=AuditResult.SUCCESS,
-            tenant_id="default",
+            tenant_id=current_user.tenant_id,
             resource=f"/admin/config/{key}/reset",
             detail={"operator_user_id": user_id},
         )
@@ -121,7 +122,7 @@ async def reset_config(
             action=AuditAction.CONFIG_CHANGE,
             user_id=current_user.sub,
             result=AuditResult.FAILURE,
-            tenant_id="default",
+            tenant_id=current_user.tenant_id,
             resource=f"/admin/config/{key}/reset",
             detail={"error": str(exc), "operator_user_id": user_id},
         )

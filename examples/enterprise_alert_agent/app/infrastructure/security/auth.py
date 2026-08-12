@@ -21,7 +21,7 @@ class TokenPayload(BaseModel):
     sub: str
     role: Role
     exp: int
-    tenant_id: str = "default"  # 签发时写入，业务侧强制使用
+    tenant_id: str   # 签发时写入，业务侧强制使用
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/admin/token")
@@ -41,14 +41,16 @@ def verify_api_key(user_id: str, api_key: str) -> bool:
     return hmac.compare_digest(api_key, expected)
 
 
-def create_access_token(user_id: str, role: Role, expires_minutes: int | None = None) -> str:
+def create_access_token(user_id: str, role: Role,
+                        tenant_id: str,
+                         expires_minutes: int | None = None) -> str:
     exp_minutes = expires_minutes or 15
     expire_at = datetime.now(tz=UTC) + timedelta(minutes=exp_minutes)
     payload = {
         "sub": user_id,
         "role": role.value,
         "exp": expire_at.timestamp(),
-        "tenant_id": "default",
+        "tenant_id": tenant_id,
     }
     token = jwt.encode(payload, settings.admin_jwt_secret, algorithm=settings.admin_jwt_algorithm)
     return token
