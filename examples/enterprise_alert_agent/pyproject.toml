@@ -58,3 +58,5 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "pymysql.*"
 ignore_missing_imports = true
+[tool.ruff.lint]
+ignore = ["B008"]  # FastAPI Depends() pattern

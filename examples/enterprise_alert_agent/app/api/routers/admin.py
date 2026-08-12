@@ -1,4 +1,4 @@
-import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.config.dynamic_settings import _dynamic_settings
 from app.infrastructure.audit.audit_logger import AuditAction, AuditResult, audit_logger
+from app.infrastructure.queue.dlq_handler import dead_letter_queue
 from app.infrastructure.security.auth import (
     Role,
     TokenPayload,
@@ -60,7 +61,7 @@ async def update_config(
             "success": True,
             "key": key,
             "value": value,
-            "timestamp": datetime.datetime.now().isoformat(),
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         }
     except Exception as exc:
         audit_logger.log(
@@ -137,3 +138,33 @@ async def get_config_change_history(
 ):
     history = _dynamic_settings.get_change_history(limit=limit)
     return {"history": history}
+
+
+@router.get("/dlq/stats")
+@limiter.limit("30/minute")
+async def get_dlq_stats(
+    current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.AUDITOR)),
+) -> dict[str, Any]:
+    """查看 DLQ 各状态计数。"""
+    return dead_letter_queue.stats()
+
+
+@router.get("/dlq/pending")
+@limiter.limit("30/minute")
+async def get_dlq_pending(
+    current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.AUDITOR)),
+) -> dict[str, Any]:
+    """列出所有待处理/重试中的 DLQ 条目。"""
+    entries = dead_letter_queue.list_pending()
+    return {"count": len(entries), "items": [e.to_dict() for e in entries]}
+
+
+@router.post("/dlq/{dlq_id}/retry")
+@limiter.limit("10/minute")
+async def retry_dlq_entry(
+    dlq_id: str,
+    current_user: TokenPayload = Depends(require_roles(Role.ADMIN)),
+) -> dict[str, Any]:
+    """手动触发单条 DLQ 条目重试。"""
+    result = dead_letter_queue.retry(dlq_id, lambda payload: payload)
+    return {"success": result, "dlq_id": dlq_id}
