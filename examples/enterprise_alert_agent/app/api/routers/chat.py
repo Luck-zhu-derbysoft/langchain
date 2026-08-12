@@ -149,6 +149,7 @@ async def submit_intervention(
     result = service._intervention_handler.submit_intervention(
         task_id=request_id,
         request=intervention,
+        execute_callback=None
     )
     return {
         "intervention_id": result.intervention_id,

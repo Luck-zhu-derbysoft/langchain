@@ -291,6 +291,13 @@ class ChatService:
                         payload={"request_id": request_id},
                         failure_reason="parallel_task_execution_failed",
                     )
+                    # 高失败率时请求人工干预
+                    if parallel_results.failed_tasks >= settings.agent_tool_failure_threshold:
+                        self._intervention_handler.create_intervention_request(
+                            task_id=failed_task_id,
+                            reason="parallel_task_execution_failed。",
+                            user_id=req.user_id,
+                        )
             else:
                 logger.info("[%s] Single-task mode", request_id)
                 # 根据工具选择结果重排序工具
@@ -465,7 +472,7 @@ class ChatService:
                     "skipped_task_ids": state.parallel_task_results.skipped_task_ids,
                 },
                 failed_tasks=state.failed_task_ids,
-                manual_intervention_required=False,
+                manual_intervention_required=len(state.failed_task_ids) >= settings.agent_tool_failure_threshold,
                 retry_count=state.retry_count,
                 fallback_used=state.fallback_used,
                 fallback_strategy=state.fallback_strategy,

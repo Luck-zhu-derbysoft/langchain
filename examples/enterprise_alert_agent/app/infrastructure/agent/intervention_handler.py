@@ -3,6 +3,8 @@
 import logging
 import time
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 from app.infrastructure.agent.a2a_protocol import (
     ManualInterventionRequest,
@@ -34,11 +36,12 @@ class InterventionHandler:
         self.pending_interventions[request.task_id].append(request)
         logger.info(f"Created intervention request for task {task_id} with reason: {reason}")
         return request
-
     def submit_intervention(
+
         self,
         task_id: str,
         request: ManualInterventionRequest,
+        execute_callback: Callable[[dict[str, Any]], Any] | None = None,
     ) -> ManualInterventionResult:
         intervention_id = f"intervention_{task_id}_{uuid.uuid4().hex[:8]}"
         started = time.perf_counter()
@@ -46,8 +49,8 @@ class InterventionHandler:
         处理提交的干预请求
 
         Args:
-            task_id: 任务ID
-            intervention: 干预请求
+            task_id:
+            intervention: 干预请求任务ID
             execute_callback: 执行回调函数（用于重试或修改参数重试）
             timeout_seconds: 用户响应超时时间
         """
@@ -56,7 +59,14 @@ class InterventionHandler:
             # 处理不同类型的干预
             if request.intervention_type == "retry":
                 logger.info(f"Retrying task {task_id} with intervention {intervention_id}")
-                result = self.execute_intervention(request)
+                result = self.execute_intervention(request, execute_callback=execute_callback)
+                self.intervention_results[intervention_id] = ManualInterventionResult(
+                    intervention_id=intervention_id,
+                    task_id=task_id,
+                    success=True,
+                    output=result,
+                    elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                )
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
                     task_id=task_id,
@@ -77,7 +87,14 @@ class InterventionHandler:
                 logger.info(
                     f"Modifying parameters for task {task_id} with intervention {intervention_id}"
                 )
-                result = self.execute_intervention(request)
+                result = self.execute_intervention(request, execute_callback=execute_callback)
+                self.intervention_results[intervention_id] = ManualInterventionResult(
+                    intervention_id=intervention_id,
+                    task_id=task_id,
+                    success=True,
+                    output=result,
+                    elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                )
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
                     task_id=task_id,
@@ -119,14 +136,16 @@ class InterventionHandler:
             if request.task_id not in self.intervention_history:
                 self.intervention_history[request.task_id] = []
             self.intervention_history[request.task_id].append(request)
-
+            # 如果字典里存在 request.task_id：移除该 key，并返回对应 value
             self.pending_interventions.pop(request.task_id, None)
-            self.intervention_results[intervention_id] = ManualInterventionResult(
-                intervention_id=intervention_id,
-                task_id=request.task_id,
-                success=False,
-                elapsed_time_ms=(time.perf_counter() - started) * 1000,
-            )
+            if intervention_id not in self.intervention_results:
+                self.intervention_results[intervention_id] = ManualInterventionResult(
+                    intervention_id=intervention_id,
+                    task_id=task_id,
+                    success=False,
+                    output="",
+                    elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                )
 
     def get_pending_intervention(self, request_id: str) -> list:
         """获取待处理的干预请求"""
@@ -152,6 +171,7 @@ class InterventionHandler:
     def execute_intervention(
         self,
         request: ManualInterventionRequest,
+        execute_callback: Callable[[dict[str, Any]], str] | None = None,
     ) -> str:
         """执行干预请求"""
         try:
@@ -160,22 +180,27 @@ class InterventionHandler:
                 logger.info(
                     f"Retrying task {request.task_id} with intervention {request.intervention_type}"
                 )
-                # 执行重试逻辑
+                if execute_callback:
+                    return execute_callback(request.retry_params or {})
+                return f"Task {request.task_id} retry submitted (no callback registered)"
             elif request.intervention_type == "skip":
                 logger.info(
                     f"Skipping task {request.task_id} with intervention {request.intervention_type}"
                 )
-                # 执行跳过逻辑
+                return f"Task {request.task_id} skipped (no callback registered)"
+
             elif request.intervention_type == "modify_params":
                 logger.info(
                     f"Modifying parameters for task {request.task_id} with intervention {request.intervention_type}"
                 )
-                # 执行修改参数逻辑
+                if execute_callback:
+                    return execute_callback(request.retry_params or {})
+                return f"Task {request.task_id} modified (no callback registered)"
             elif request.intervention_type == "abort":
                 logger.info(
                     f"Aborting task {request.task_id} with intervention {request.intervention_type}"
                 )
-                # 执行中止逻辑
+                return f"Task {request.task_id} aborted (no callback registered)"
             else:
                 logger.error(
                     f"Unknown intervention type {request.intervention_type} for task {request.task_id}"
