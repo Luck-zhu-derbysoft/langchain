@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -12,6 +13,8 @@ from psycopg import sql
 from psycopg_pool import ConnectionPool
 
 from app.config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -81,24 +84,8 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             conninfo=f"postgresql://{settings.pg_user}:{settings.pg_password}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}",
             min_size=2,
             max_size=10,
-            timeout=5,
+            timeout=5,  # `从连接池拿一个连接，拿不到会等待 timeout=5 秒超时抛异常
         )
-
-        @contextmanager
-        def _pg_conn(self) -> Iterator[psycopg.Connection]:
-            conn = self._pg_pool.getconn()
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                self._pg_pool.putconn(conn)  # ← 放回连接池
-
-        def __del__(self) -> None:
-            if hasattr(self, "_pg_pool"):
-                self._pg_pool.closeall()
 
         self._ttl_days = settings.memory_ttl_days
         self._cache_ttl = settings.redis_cache_ttl_seconds
@@ -112,24 +99,25 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
 
     @contextmanager
     def _pg_conn(self) -> Iterator[psycopg.Connection]:
-        conn = psycopg.connect(
-            host=settings.pg_host,
-            port=settings.pg_port,
-            dbname=settings.pg_db,
-            user=settings.pg_user,
-            password=settings.pg_password,
-            sslmode=settings.pg_ssl_mode,
-            connect_timeout=5,
-        )
+        # ConnectionPool 只是创建对象，不会预创建连接，第一次getconn才真正建立 pg 连接；
+        # 如果是长驻留服务，建议启动时做一次预热
+        conn = None
         try:
+            conn = self._pg_pool.getconn()
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            if conn is not None:
+                conn.rollback()
             raise
 
         finally:
-            conn.close()
+            if conn is not None:
+                self._pg_pool.putconn(conn)
+
+    def __del__(self) -> None:
+        if hasattr(self, "_pg_pool"):
+            self._pg_pool.close()
 
     def load_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
         summary = ""
@@ -147,7 +135,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                     turn_count=data.get("turn_count", 0),
                 )
         except Exception:
-            pass
+            logger.warning("Redis cache read failed, falling back to PG: %s", exc_info=True)
         # 如果 Redis 中没有有效缓存，则从 PostgreSQL 加载近期对话
         with self._pg_conn() as conn:
             with conn.cursor() as cur:
@@ -258,16 +246,18 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             cached = self._redis_client.get(scope_key)  # 触发连接检查
             if cached:
                 cache_data = json.loads(cached)
-                turns = cache_data.get("recent_turns", [])
-                turns.append({"role": role, "content": safe_content})
-                if len(turns) > settings.cache_recent_turns_limit:  # 假设我们只缓存最近N轮对话
-                    turns = turns[-settings.cache_recent_turns_limit :]
-                cache_data["recent_turns"] = turns
-                cache_data["turn_count"] = next_turn
-                self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
+            else:
+                cache_data = {"summary": "", "recent_turns": []}
+            turns = cache_data.get("recent_turns", [])
+            turns.append({"role": role, "content": safe_content})
+            if len(turns) > settings.cache_recent_turns_limit:  # 假设我们只缓存最近N轮对话
+                turns = turns[-settings.cache_recent_turns_limit :]
+            cache_data["recent_turns"] = turns
+            cache_data["turn_count"] = next_turn
+            self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
 
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Redis cache update failed: %s", e)
 
     def save_summary(self, scope: MemoryScope, summary: str) -> None:
         safe_summary = self._sanitize(summary) if self._redact_pii else summary
@@ -289,11 +279,13 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             cached = self._redis_client.get(scope_key)  # 触发连接检查
             if cached:
                 cache_data = json.loads(cached)
-                cache_data["summary"] = safe_summary
-                cache_data["turn_count"] = turn_count
-                self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
-        except Exception:
-            pass
+            else:
+                cache_data = {"summary": "", "recent_turns": [], "turn_count": 0}
+            cache_data["summary"] = safe_summary
+            cache_data["turn_count"] = turn_count
+            self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
+        except Exception as e:
+            logger.warning("Redis cache write failed: %s", e)
 
     def clear_memory(self, scope: MemoryScope) -> None:
         with self._pg_conn() as conn, conn.cursor() as cur:
@@ -317,8 +309,8 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         scope_key = self._scope_key(scope)
         try:
             self._redis_client.delete(scope_key)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Redis cache delete failed: %s", e)
 
     def _sanitize(self, text: str) -> str:
         value = text or ""
