@@ -114,7 +114,7 @@ flowchart TB
 | 7 | **人机协同未接线** (已修复)| 人工干预只有手动 API 可触达；`chat_service` 中 `manual_intervention_required` 恒为 `False`；`create_intervention_request()` 从未被调用；`execute_intervention()` 未真正接线回调；`finally` 块无条件把结果写成 `success=False` 覆盖真实结果 | `app/infrastructure/agent/intervention_handler.py` |
 | 8 | **动态配置部分失效** (已修复)| `ChatService.__init__` 从 `ConfigManager` 读取，但 `_run_agent_loop`/`_execute_decomposed_tasks` 内部直接读 `settings.*` → 管理端改了这些 key 不生效；`DynamicSettings` 无锁、无持久化、value 无校验；`/admin/config/{key}` 无 key 白名单 | `app/application/services/chat_service.py`、`app/config/dynamic_settings.py`、`app/api/routers/admin.py` |
 | 9 | **资源边界**(已修复) | `MetricsCollector` 无界增长（内存泄漏）、无锁（多线程写竞争）；`get_summary` 忽略 `request_id` 聚合所有数据；`/ingest` 对 `content` 与上传文件**无大小限制**（DoS 面）；`BudgetExceededError` 未被捕获 → 落入 500 | `app/observability/metrics.py`、`app/api/routers/ingest.py`、`app/infrastructure/llm/model_client.py` |
-| 10 | **线程安全** | `AgentRegistry`、`Retriever` 缓存、`MetricsCollector`、`InterventionHandler`、`DynamicSettings` 在并行任务线程中被并发读写却无锁 | 多处 |
+| 10 | **线程安全**(已修复) | `AgentRegistry`、`Retriever` 缓存、`MetricsCollector`、`InterventionHandler`、`DynamicSettings` 在并行任务线程中被并发读写却无锁 | 多处 |
 
 ---
 

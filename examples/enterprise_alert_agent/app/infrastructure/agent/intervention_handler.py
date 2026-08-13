@@ -4,6 +4,8 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
+from threading import RLock
 from typing import Any
 
 from app.infrastructure.agent.a2a_protocol import (
@@ -23,6 +25,7 @@ class InterventionHandler:
         self.intervention_history: dict[str, list] = {}
         self.pending_interventions: dict[str, list] = {}
         self.intervention_results: dict[str, ManualInterventionResult] = {}
+        self._lock = RLock()
 
     def create_intervention_request(
         self, task_id: str, reason: str, user_id: str = "system"
@@ -31,13 +34,12 @@ class InterventionHandler:
         request = ManualInterventionRequest(
             task_id=task_id, intervention_type="pending", user_id=user_id
         )
-        if request.task_id not in self.pending_interventions:
-            self.pending_interventions[request.task_id] = []
-        self.pending_interventions[request.task_id].append(request)
+        with self._lock:
+            self.pending_interventions.setdefault(request.task_id, []).append(request)
         logger.info(f"Created intervention request for task {task_id} with reason: {reason}")
         return request
-    def submit_intervention(
 
+    def submit_intervention(
         self,
         task_id: str,
         request: ManualInterventionRequest,
@@ -60,12 +62,14 @@ class InterventionHandler:
             if request.intervention_type == "retry":
                 logger.info(f"Retrying task {task_id} with intervention {intervention_id}")
                 result = self.execute_intervention(request, execute_callback=execute_callback)
-                self.intervention_results[intervention_id] = ManualInterventionResult(
-                    intervention_id=intervention_id,
-                    task_id=task_id,
-                    success=True,
-                    output=result,
-                    elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                self._store_result(
+                    ManualInterventionResult(
+                        intervention_id=intervention_id,
+                        task_id=task_id,
+                        success=True,
+                        output=result,
+                        elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                    )
                 )
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
@@ -88,12 +92,14 @@ class InterventionHandler:
                     f"Modifying parameters for task {task_id} with intervention {intervention_id}"
                 )
                 result = self.execute_intervention(request, execute_callback=execute_callback)
-                self.intervention_results[intervention_id] = ManualInterventionResult(
-                    intervention_id=intervention_id,
-                    task_id=task_id,
-                    success=True,
-                    output=result,
-                    elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                self._store_result(
+                    ManualInterventionResult(
+                        intervention_id=intervention_id,
+                        task_id=task_id,
+                        success=True,
+                        output=result,
+                        elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                    )
                 )
                 return ManualInterventionResult(
                     intervention_id=intervention_id,
@@ -133,40 +139,46 @@ class InterventionHandler:
                 elapsed_time_ms=(time.perf_counter() - started) * 1000,
             )
         finally:
-            if request.task_id not in self.intervention_history:
-                self.intervention_history[request.task_id] = []
-            self.intervention_history[request.task_id].append(request)
-            # 如果字典里存在 request.task_id：移除该 key，并返回对应 value
-            self.pending_interventions.pop(request.task_id, None)
-            if intervention_id not in self.intervention_results:
-                self.intervention_results[intervention_id] = ManualInterventionResult(
-                    intervention_id=intervention_id,
-                    task_id=task_id,
-                    success=False,
-                    output="",
-                    elapsed_time_ms=(time.perf_counter() - started) * 1000,
+            with self._lock:
+                self.intervention_history.setdefault(request.task_id, []).append(deepcopy(request))
+                self.pending_interventions.pop(request.task_id, None)
+                self.intervention_results.setdefault(
+                    intervention_id,
+                    ManualInterventionResult(
+                        intervention_id=intervention_id,
+                        task_id=task_id,
+                        success=False,
+                        output="",
+                        elapsed_time_ms=(time.perf_counter() - started) * 1000,
+                    ),
                 )
 
     def get_pending_intervention(self, request_id: str) -> list:
         """获取待处理的干预请求"""
-        return self.pending_interventions.get(request_id, [])
+        with self._lock:
+            return deepcopy(self.pending_interventions.get(request_id, []))
 
     def get_intervention_history(self, request_id: str) -> list:
         """获取干预历史"""
-        return self.intervention_history.get(request_id, [])
+        with self._lock:
+            return deepcopy(self.intervention_history.get(request_id, []))
 
     def add_pending_intervention(self, request_id: str, request: ManualInterventionRequest):
         """添加待处理的干预请求"""
-        if request_id not in self.pending_interventions:
-            self.pending_interventions[request_id] = []
-        self.pending_interventions[request_id].append(request)
+        with self._lock:
+            self.pending_interventions.setdefault(request_id, []).append(request)
 
     def remove_pending_intervention(self, request_id: str, request: ManualInterventionRequest):
         """移除待处理的干预请求"""
-        if request_id in self.pending_interventions:
-            self.pending_interventions[request_id] = [
-                iv for iv in self.pending_interventions[request_id] if iv != request
-            ]
+        with self._lock:
+            if request_id in self.pending_interventions:
+                self.pending_interventions[request_id] = [
+                    iv for iv in self.pending_interventions[request_id] if iv != request
+                ]
+
+    def _store_result(self, result: ManualInterventionResult) -> None:
+        with self._lock:
+            self.intervention_results[result.intervention_id] = deepcopy(result)
 
     def execute_intervention(
         self,

@@ -1,5 +1,6 @@
 import logging
 import threading
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
@@ -68,7 +69,13 @@ class DynamicSettings:
             return dict(self._overrides)
 
     def get_change_history(self, limit: int = 100) -> list:
-        return sorted(self._change_history, key=lambda x: x["timestamp"], reverse=True)[:limit]
+        with self._lock:
+            history = sorted(
+                self._change_history,
+                key=lambda entry: entry["timestamp"],
+                reverse=True,
+            )[:limit]
+            return deepcopy(history)
 
 
 _dynamic_settings = DynamicSettings()
