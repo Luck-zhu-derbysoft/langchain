@@ -25,8 +25,8 @@ from app.schemas.ingest import IngestResponse, IngestTextRequest
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
-MAX_INGEST_TEXT_SIZE = 1 * 1024 * 1024  # 1MB
-MAX_INGEST_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_INGEST_TEXT_SIZE = settings.ingest_max_text_bytes  # 1MB
+MAX_INGEST_FILE_SIZE = settings.ingest_max_file_bytes  # 10MB
 
 # 初始化依赖链：EmbeddingClient → ChromaStore → IngestService
 _trace = LangSmithTracer(
@@ -78,7 +78,7 @@ def ingest_text(
         "metadata": {"category": "告警规则"}
     }
     """
-    if len(req.content) > MAX_INGEST_TEXT_SIZE:
+    if len(req.content.encode("utf-8")) > MAX_INGEST_TEXT_SIZE:
         raise HTTPException(
             status_code=413, detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit"
         )
@@ -133,14 +133,18 @@ async def ingest_file(
     )
     file_name = file.filename or "uploaded_file"
     try:
-        content_bytes = await file.read()
+        content_bytes = await file.read(MAX_INGEST_FILE_SIZE + 1)  # 读取文件内容，限制最大字节数
         if not content_bytes:
             raise HTTPException(status_code=413, detail="上传文件内容为空")
-        if len(content_bytes) > MAX_INGEST_FILE_SIZE:
-            raise HTTPException(
-                status_code=413, detail=f"File exceeds {MAX_INGEST_FILE_SIZE / 1024 / 1024}MB limit"
-            )
+        # if len(content_bytes) > MAX_INGEST_FILE_SIZE:
+        #     raise HTTPException(
+        #         status_code=413, detail=f"File exceeds {MAX_INGEST_FILE_SIZE / 1024 / 1024}MB limit"
+        #     )
         content_str = _parse_upload_to_text(file_name, content_bytes)
+        if len(content_str.encode("utf-8")) > MAX_INGEST_TEXT_SIZE:
+            raise HTTPException(
+                status_code=413, detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit"
+            )
         resolved_source_id = source_id.strip() or Path(file_name).stem
         ingest_req = IngestTextRequest(
             content=content_str,

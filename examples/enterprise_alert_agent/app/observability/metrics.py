@@ -2,6 +2,7 @@
 
 
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Optional
 
 
@@ -55,67 +56,85 @@ class PerformanceMetrics:
         return sorted_latencies[max(0, index_99)]
 class MetricsCollector:
     """性能指标收集器"""
-    def __init__(self)-> None:
+    def __init__(self, max_requests: int = 10000, max_latency_samples_per_request: int = 100) -> None:
         self.metrics_store: dict[str, PerformanceMetrics] = {}
+        self.max_requests = max_requests
+        self.max_latency_samples_per_request = max_latency_samples_per_request
+        self._lock = RLock()  # 用于线程安全的访问
     def create_metrics(self, request_id: str)-> PerformanceMetrics:
-        metrics = PerformanceMetrics(request_id=request_id, total_time_ms=0.0)
-        self.metrics_store[request_id] = metrics
-        return metrics
+        with self._lock:
+            if len(self.metrics_store) >= self.max_requests:
+                # 超过最大请求数，清理最旧的请求指标
+                oldest_request_id = next(iter(self.metrics_store))
+                del self.metrics_store[oldest_request_id]
+            metrics = PerformanceMetrics(request_id=request_id, total_time_ms=0.0)
+            self.metrics_store[request_id] = metrics
+            return metrics
     def record_latency(self, request_id: str, latency_ms: float):
             """记录延迟"""
-            if request_id in self.metrics_store:
-                self.metrics_store[request_id].latencies_ms.append(latency_ms)
+            with self._lock:
+                if request_id in self.metrics_store:
+                    metrics = self.metrics_store[request_id]
+                    if len(metrics.latencies_ms) > self.max_latency_samples_per_request:
+                        metrics.latencies_ms.pop(0)
+                    metrics.latencies_ms.append(latency_ms)
+                    metrics.total_time_ms += latency_ms
+
 
     def record_token_usage(self, request_id: str, tokens: int):
         """记录 token 使用"""
-        if request_id in self.metrics_store:
-            self.metrics_store[request_id].token_usage += tokens
-            # 假设 1K token = $0.002 (根据实际模型定价调整)
-            self.metrics_store[request_id].estimated_cost_usd += (tokens / 1000) * 0.002
+        with self._lock:
+            if request_id in self.metrics_store:
+                self.metrics_store[request_id].token_usage += tokens
+                # 假设 1K token = $0.002 (根据实际模型定价调整)
+                self.metrics_store[request_id].estimated_cost_usd += (tokens / 1000) * 0.002
 
     def record_cache_hit(self, request_id: str):
         """记录缓存命中"""
-        if request_id in self.metrics_store:
-            self.metrics_store[request_id].cache_hit_count += 1
+        with self._lock:
+            if request_id in self.metrics_store:
+                self.metrics_store[request_id].cache_hit_count += 1
 
     def record_cache_miss(self, request_id: str):
         """记录缓存未命中"""
-        if request_id in self.metrics_store:
-            self.metrics_store[request_id].cache_miss_count += 1
+        with self._lock:
+            if request_id in self.metrics_store:
+                self.metrics_store[request_id].cache_miss_count += 1
 
     def record_error(self, request_id: str):
         """记录错误"""
-        if request_id in self.metrics_store:
-            self.metrics_store[request_id].error_count += 1
+        with self._lock:
+            if request_id in self.metrics_store:
+                self.metrics_store[request_id].error_count += 1
 
     def record_retry(self, request_id: str):
         """记录重试"""
-        if request_id in self.metrics_store:
-            self.metrics_store[request_id].retry_count += 1
+        with self._lock:
+            if request_id in self.metrics_store:
+                self.metrics_store[request_id].retry_count += 1
 
     def get_metrics(self, request_id: str) -> Optional[PerformanceMetrics]:
         """获取指标"""
-        return self.metrics_store.get(request_id)
+        with self._lock:
+                return self.metrics_store.get(request_id)
     def get_summary(self, request_id: str) -> Optional[dict]:
         """获取指标汇总"""
-        if not self.metrics_store:
-            return None
-        all_latencies = []
-        total_token_usage = 0
-        total_cost = 0.0
-        total_errors = 0
-        for metrics in self.metrics_store.values():
-            all_latencies.extend(metrics.latencies_ms)
-            total_token_usage += metrics.token_usage
-            total_cost += metrics.estimated_cost_usd
-            total_errors += metrics.error_count
-        if not all_latencies:
-            return None
-        return {
-            "p50_latency_ms": sorted(all_latencies)[int(len(all_latencies) * 0.5) - 1],
-            "p95_latency_ms": sorted(all_latencies)[int(len(all_latencies) * 0.95) - 1],
-            "p99_latency_ms": sorted(all_latencies)[int(len(all_latencies) * 0.99) - 1],
-            "total_token_usage": total_token_usage,
-            "total_cost": total_cost,
-            "total_errors": total_errors
-        }
+        with self._lock:
+            metrics = self.get_metrics(request_id)
+            if not metrics:
+                return None
+            return {
+                "request_id": metrics.request_id,
+                "total_time_ms": metrics.total_time_ms,
+                "p50_latency_ms": metrics.get_p50_latency(),
+                "p95_latency_ms": metrics.get_p95_latency(),
+                "p99_latency_ms": metrics.get_p99_latency(),
+                "total_token_usage": metrics.token_usage,
+                "estimated_cost_usd": metrics.estimated_cost_usd,
+                "cache_hit_count": metrics.cache_hit_count,
+                "cache_miss_count": metrics.cache_miss_count,
+                "cache_hit_rate": metrics.get_cache_hit_rate(),
+                "error_count": metrics.error_count,
+                "retry_count": metrics.retry_count,
+                "success_rate": metrics.get_success_rate()
+            }

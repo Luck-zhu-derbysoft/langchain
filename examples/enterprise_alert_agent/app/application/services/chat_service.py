@@ -29,6 +29,7 @@ from app.infrastructure.cache.multi_tier_cache import multi_tier_cache
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis, FaultSeverity
 from app.infrastructure.llm.model_client import (
+    BudgetExceededError,
     ModelAuthError,
     ModelClient,
     ModelRequestError,
@@ -525,6 +526,17 @@ class ChatService:
                 "active_agent_id": resp.active_agent_id,
                 "assigned_agent_ids": resp.assigned_agent_ids,
                 "performance_metrics": resp.performance_metrics,
+            }
+        except BudgetExceededError as e:
+            self.metrics_collector.record_error(request_id=request_id)
+            logger.exception("[%s] BudgetExceededError failed", request_id)
+            self.trace.end_run(ask_run, error=LangSmithTracer.format_error(e))
+            yield {
+                "type": "error",
+                "code": "429",
+                "message": "本次请求已超过模型 token 预算，请缩短问题或稍后重试",
+                "request_id": request_id,
+                "trace_id": trace_id,
             }
         except ModelAuthError as e:
             self.metrics_collector.record_error(request_id=request_id)

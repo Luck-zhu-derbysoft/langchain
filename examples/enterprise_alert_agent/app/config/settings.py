@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     rerank_model: str = "ms-marco-MiniLM-L-12-v2"
 
     max_tokens_per_request: int = 200000
+    metrics_max_requests: int = 10000
+    metrics_max_latency_samples_per_request: int = 100
+    ingest_max_text_bytes: int = 1 * 1024 * 1024
+    ingest_max_file_bytes: int = 10 * 1024 * 1024
     vector_db_path: str = "./data/vectorstore"
     sqlite_path: str = "./data/app.db"
 

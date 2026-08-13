@@ -122,12 +122,10 @@ class ModelClient:
                 _token_counter[0] += (
                     usage.total_tokens if isinstance(usage.total_tokens, int) else 0
                 )
-                if _token_counter[0] <= settings.max_tokens_per_request:
-                    outputs["total_tokens"] = usage.total_tokens
-                else:
+                if _token_counter[0] >= settings.max_tokens_per_request:
                     self._tracer.end_run(llm_run, outputs=outputs)
                     raise BudgetExceededError("Model request exceeds the maximum token limit.")
-
+                outputs["total_tokens"] = usage.total_tokens
             self._tracer.end_run(llm_run, outputs=outputs)
             if return_message:
                 return message
@@ -139,6 +137,9 @@ class ModelClient:
         except (APIConnectionError, APIError) as exc:
             self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
             raise ModelRequestError("Model request failed") from exc
+        except BudgetExceededError as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise exc
 
     def stream_chat(
         self,user_query:str,system_prompt:str,*,
