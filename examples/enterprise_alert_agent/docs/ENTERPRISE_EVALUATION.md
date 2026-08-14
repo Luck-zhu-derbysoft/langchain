@@ -116,11 +116,11 @@ flowchart TB
 | 9 | **资源边界**(已修复) | `MetricsCollector` 无界增长（内存泄漏）、无锁（多线程写竞争）；`get_summary` 忽略 `request_id` 聚合所有数据；`/ingest` 对 `content` 与上传文件**无大小限制**（DoS 面）；`BudgetExceededError` 未被捕获 → 落入 500 | `app/observability/metrics.py`、`app/api/routers/ingest.py`、`app/infrastructure/llm/model_client.py` |
 | 10 | **线程安全**(已修复) | `AgentRegistry`、`Retriever` 缓存、`MetricsCollector`、`InterventionHandler`、`DynamicSettings` 在并行任务线程中被并发读写却无锁 | 多处 |
 
----
+根据文档内容，修复五、P1 级问题10 | **线程安全 。给出对比修改的代码，我手动修复
 
 ## 六、P2 级问题（打磨完善项）
 
-- **Rerank 是「假」的**：`flashrank` 依赖与 `rerank_model="ms-marco-MiniLM-L-12-v2"` 已声明但从未使用；所谓 hybrid 只是「稠密余弦 + 词法重叠」加权融合，非真正的 BM25 混合检索/交叉编码器重排。位置：`app/rag/retrieval/retriever.py`。
+- **(已修复)Rerank 是「假」的**：`flashrank` 依赖与 `rerank_model="ms-marco-MiniLM-L-12-v2"` 已声明但从未使用；所谓 hybrid 只是「稠密余弦 + 词法重叠」加权融合，非真正的 BM25 混合检索/交叉编码器重排。位置：`app/rag/retrieval/retriever.py`。
 - **A2A 是空壳**：`A2AProtocol` 只是 set/get 存根，无真实线协议；`from sqlalchemy import Enum` 遮蔽内置 `Enum`。位置：`app/infrastructure/agent/a2a_protocol.py`。
 - **死代码/未用依赖**：`passlib[bcrypt]`（无密码哈希使用）、`alert_rules` 从未填充、`admin_jwt_exp_minutes` 未用、`data/` 下 `mock_checkpoint.py`/`mock_memoryStore.py`/`langsmith_demo.py` 不属于应用。
 - **同步阻塞**：`time.sleep(backoff)` 在重试路径阻塞线程；psycopg/redis 均为同步驱动。
@@ -259,7 +259,7 @@ flowchart TB
 - [ ] **4.3** 修复 `AlertManager` 线程分发 Bug（线程安全队列 / `run_coroutine_threadsafe`）
 
 
-### 阶段 1：生产能力（P1，2~3 周）8.12-
+### 阶段 1：生产能力（P1，2~3 周）8.12-8.15
 
 - [ ] **P1-1** 审计落盘：`audit.jsonl` 改为真正的 append-only 追加写；全动作埋点（chat/intervention/login/permission）；detail 脱敏
 - [ ] **P1-2** 测试：补单元测试（mock 模型/DB）；集成测试接入 Testcontainers/本地模拟；配置 CI（GitHub Actions）

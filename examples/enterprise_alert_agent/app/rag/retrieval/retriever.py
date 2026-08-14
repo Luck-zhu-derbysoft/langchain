@@ -6,12 +6,11 @@
 
 import json
 import logging
-import math
 import re
-from collections import Counter
+import threading
 from copy import deepcopy
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langsmith import RunTree
 
@@ -20,6 +19,37 @@ from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.observability.langsmith_tracer import LangSmithTracer
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from flashrank import Ranker as RankerType
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    logger.warning(
+        "rank_bm25 模块未安装，检索器将无法使用 BM25 功能。请安装 rank_bm25 以启用 BM25 检索。"
+    )
+    BM25Okapi = None
+
+try:
+    from flashrank import Ranker, RerankRequest
+except ImportError:
+    logger.warning(
+        "flashrank 模块未安装，检索器将无法使用 rerank 功能。请安装 flashrank 以启用 rerank 检索。"
+    )
+    Ranker = None
+    RerankRequest = None
+
+_reranker_cache: dict[str, "RankerType"] = {}  # 全局缓存，避免重复创建 Ranker 实例
+_reranker_lock = threading.Lock()
+
+
+def _get_reranker(model_name: str) -> "RankerType | None":
+    if Ranker is None:
+        return None
+    with _reranker_lock:
+        if model_name not in _reranker_cache:
+            _reranker_cache[model_name] = Ranker(model_name)
+        return _reranker_cache[model_name]
 
 
 class Retriever:
@@ -74,7 +104,7 @@ class Retriever:
                 return []
 
             # RAG 混合检索（Hybrid Search + 重排）
-            reranked = self._hybird_rerank(rewritten_query, candidates)
+            reranked = self._hybrid_rerank(rewritten_query, candidates)
             filtered = [doc for doc in reranked if doc["score"] >= settings.retrieval_min_score]
             final_k = top_k or settings.retrieval_final_k
             # 如果过滤后没有了，就用重排结果reranked的 top_k
@@ -109,22 +139,26 @@ class Retriever:
         short_history = self._tail_turns(history_text, settings.retrieval_max_history_turns)
         return f"{query}\n\n最近上下文:\n{short_history}"
 
-    # RAG 混合检索（Hybrid Search + 重排）
-    def _hybird_rerank(self, query: str, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        query_token = self._tokenize(query)
+    # RAG 混合检索：稠密向量 + BM25（词法） 融合，再用 flashrank 重排
+    def _hybrid_rerank(self, query: str, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # # 稠密分占比
         alpha = float(settings.retrieval_hybrid_alpha)
-        recoreds: list[dict[str, Any]] = []
-        for doc in docs:
+        lexical_bm25_scores = self._bm25_scores(query, docs)
+
+        merged: list[dict[str, Any]] = []
+        for doc, lexical_score in zip(docs, lexical_bm25_scores):
             dense = float(doc.get("score", 0.0))  # 确保有 score 字段
-            lexical = self._lexical_score(query_token, self._tokenize(str(doc.get("content", ""))))
+            lexical = lexical_score
             hybrid = alpha * dense + (1 - alpha) * lexical
             item = dict(doc)
             item["dense_score"] = dense
             item["lexical_score"] = lexical
             item["score"] = hybrid
-            recoreds.append(item)
-        return sorted(recoreds, key=lambda d: d["score"], reverse=True)
+            merged.append(item)
+        merged.sort(key=lambda d: d["score"], reverse=True)
+        if settings.rerank_enabled:
+            merged = self._flashrank_rerank(query, merged)
+        return merged
 
     @staticmethod
     def _tail_turns(history_text: str, max_turns: int) -> str:
@@ -144,13 +178,37 @@ class Retriever:
         return [t for t in re.split(r"\W+", text.lower()) if t]
 
     @staticmethod
-    def _lexical_score(query_token: list[str], doc_token: list[str]) -> float:
-        if not query_token or not doc_token:
-            return 0.0
-        q_count = Counter(query_token)
-        d_count = Counter(doc_token)
-        overlap = sum(min(q_count[t], d_count[t]) for t in q_count)
-        norm = math.sqrt(sum(c**2 for c in q_count.values())) * math.sqrt(
-            sum(c**2 for c in d_count.values())
-        )
-        return float(overlap / norm) if norm > 0 else 0.0
+    def _bm25_scores(query: str, docs: list[dict[str, Any]]) -> list[float]:
+        if not settings.retrieval_use_bm25 or BM25Okapi is None:
+            return [0.0] * len(docs)
+        corpus = [Retriever._tokenize(str(doc.get("content", ""))) for doc in docs]
+        bm25 = BM25Okapi(corpus)
+        query_token = Retriever._tokenize(query)
+        raw_scores = list(bm25.get_scores(query_token))
+        max_score = max(raw_scores) if raw_scores else 0.0
+        if max_score <= 0.0:
+            return [0.0] * len(docs)
+        return [raw_score / max_score for raw_score in raw_scores]
+
+    @staticmethod
+    def _flashrank_rerank(query: str, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        reranker = _get_reranker(settings.rerank_model)
+        if reranker is None or RerankRequest is None:
+            return docs
+        try:
+            passages = [
+                {"id": str(idx), "content": doc.get("content", "")} for idx, doc in enumerate(docs)
+            ]
+            rerank_request = RerankRequest(
+                query=query,
+                passages=passages,
+            )
+            rerank_results = reranker.rerank(rerank_request)
+            score_by_idx = {int(r["id"]): float(r["score"]) for r in rerank_results}
+            for idx, doc in enumerate(docs):
+                doc["rerank_score"] = score_by_idx.get(idx, doc.get("score"))
+            docs.sort(key=lambda d: d["rerank_score"], reverse=True)
+            return docs
+        except Exception:
+            logger.warning("flashrank rerank failed, fallback to hybrid score", exc_info=True)
+            return docs

@@ -18,6 +18,7 @@ dependencies = [
     "openai-agents",
     "langsmith",
     "flashrank>=0.2.10",
+    "rank-bm25>=0.2.2",
     "pymysql>=1.2.0",
     "langgraph>=0.2.50",          # InMemoryStore所在包，≥0.2.20才有store.memory
     "langchain>=0.3.0",            # create_agent依赖主包

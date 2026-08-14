@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     context_top_k: int = 3
     rerank_enabled: bool = True
     rerank_model: str = "ms-marco-MiniLM-L-12-v2"
+    # 混合检索配置
+    retrieval_candidate_k: int = 12  # 初始召回
+    retrieval_final_k: int = 4  # 最终给上下文
+    retrieval_min_score: float = 0.45  # 过滤阈值
+    retrieval_hybrid_alpha: float = 0.7  # 稠密分占比
+    retrieval_query_rewrite: bool = True
+    retrieval_max_history_turns: int = 2
+    retrieval_query_rewrite_enabled: bool = True
+    retrieval_use_bm25: bool = True # 关闭则退化为纯稠密
 
     max_tokens_per_request: int = 200000
     metrics_max_requests: int = 10000
@@ -76,13 +85,7 @@ class Settings(BaseSettings):
     mysql_password: str = ""
     sql_max_rows: int = 200
     sql_query_timeout_seconds: int = 5
-    # 混合检索配置
-    retrieval_candidate_k: int = 12  # 初始召回
-    retrieval_final_k: int = 4  # 最终给上下文
-    retrieval_min_score: float = 0.45  # 过滤阈值
-    retrieval_hybrid_alpha: float = 0.7  # 稠密分占比
-    retrieval_query_rewrite: bool = True
-    retrieval_max_history_turns: int = 2
+
     # --- Time / Clock Tool 配置 ---
     app_timezone: str = "Asia/Shanghai"
     time_tool_enabled: bool = True
