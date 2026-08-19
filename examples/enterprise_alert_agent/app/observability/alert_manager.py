@@ -5,7 +5,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 
-from app.observability.alert_types import Alert, AlertRule, AlertSeverity, AlertTypes
+from app.observability.alert_types import Alert, AlertSeverity, AlertTypes
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +15,11 @@ class AlertManager:
 
     def __init__(self) -> None:
         self.alerts: dict[str, Alert] = {}  # 存储告警事件
-        self.alert_rules: dict[str, AlertRule] = {}  # 存储告警规则
         self.alert_history: list[Alert] = []  # 告警历史记录
         self._max_history_size = 1000  # 最大历史记录数
         self._dispatch_queue: queue.Queue[Alert] = queue.Queue()
         self._dispatch_thread = threading.Thread(
-            target=self._dispatch_worker, daemon=True,name="AlertDispatchThread"
+            target=self._dispatch_worker, daemon=True, name="AlertDispatchThread"
         )
         self._dispatch_thread.start()
 
