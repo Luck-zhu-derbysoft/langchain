@@ -35,8 +35,8 @@ class AgentRegistry:
         with self._lock:
             agents = sorted(self._agents.values(), key=lambda item: item.priority, reverse=True)
             return deepcopy(agents)
-
     def find_by_tool(self, tool_name: str) -> list[AgentDescriptor]:
+
         with self._lock:
             agents = [
                 agent for agent in self._agents.values() if tool_name in agent.supported_tools

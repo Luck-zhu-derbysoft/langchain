@@ -121,7 +121,7 @@ flowchart TB
 ## 六、P2 级问题（打磨完善项）
 
 - **(已修复)Rerank 是「假」的**：`flashrank` 依赖与 `rerank_model="ms-marco-MiniLM-L-12-v2"` 已声明但从未使用；所谓 hybrid 只是「稠密余弦 + 词法重叠」加权融合，非真正的 BM25 混合检索/交叉编码器重排。位置：`app/rag/retrieval/retriever.py`。
-- **A2A 是空壳**：`A2AProtocol` 只是 set/get 存根，无真实线协议；`from sqlalchemy import Enum` 遮蔽内置 `Enum`。位置：`app/infrastructure/agent/a2a_protocol.py`。
+- **(已修复)A2A 是空壳**：`A2AProtocol` 只是 set/get 存根，无真实线协议；`from sqlalchemy import Enum` 遮蔽内置 `Enum`。位置：`app/infrastructure/agent/a2a_protocol.py`。
 - **死代码/未用依赖**：`passlib[bcrypt]`（无密码哈希使用）、`alert_rules` 从未填充、`admin_jwt_exp_minutes` 未用、`data/` 下 `mock_checkpoint.py`/`mock_memoryStore.py`/`langsmith_demo.py` 不属于应用。
 - **同步阻塞**：`time.sleep(backoff)` 在重试路径阻塞线程；psycopg/redis 均为同步驱动。
 - **MCP 客户端**：每次调用新建会话（浪费）；`call_tool` 无超时（可能挂起）；`logger.exception("...%s")` 缺 `e` 参数（格式化 Bug）；工具无客户端 allowlist，模型可见远端全部工具。位置：`app/infrastructure/mcp/mcp_client.py`、`mcp_service.py`。

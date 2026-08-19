@@ -1,12 +1,12 @@
 """A2A 协议 - V1 基础版本 (仅包含意图分类)"""
 
+import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Any
-
-from sqlalchemy import Enum
 
 
 class MessageType(str, Enum):
@@ -27,6 +27,26 @@ class MessagePriority(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     NORMAL = "normal"
+
+
+@dataclass
+class AgentTaskExecutionRequest:
+    task_id: str
+    query: str
+    agent_id: str
+    preferred_tool: str = ""
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentTaskExecutionResult:
+    task_id: str
+    agent_id: str
+    success: bool
+    output: str
+    error_type: str = ""
+    latency_ms: float = 0.0
+    trace_id: str = ""
 
 
 @dataclass
@@ -82,7 +102,6 @@ class A2AProtocol:
 
     def __init__(self):
         self.version = "1.0"
-        self.intent_classification = None
 
     def set_intent_classification(self, intent):
         """设置意图分类"""
@@ -91,6 +110,54 @@ class A2AProtocol:
     def get_intent_classification(self):
         """获取意图分类"""
         return self.intent_classification
+
+    def build_task_request(
+        self,
+        request: AgentTaskExecutionRequest,
+        conversation_id: str | None = None,
+        priority: MessagePriority = MessagePriority.NORMAL,
+    ) -> A2AMessage:
+        """将任务请求封装为 A2A 消息信封，生成 trace_id 供响应关联"""
+
+        return A2AMessage(
+            message_type=MessageType.TASK_REQUEST,
+            payload=asdict(request),
+            conversation_id=conversation_id,
+            priority=priority,
+        )
+
+    def build_task_response(
+        self,
+        result: AgentTaskExecutionResult,
+        request_message: A2AMessage,
+    ) -> A2AMessage:
+        """将任务响应封装为 A2A 消息信封，生成 trace_id 供请求关联"""
+
+        return A2AMessage(
+            message_type=MessageType.TASK_RESPONSE,
+            payload=asdict(result),
+            conversation_id=request_message.conversation_id,
+            trace_id=request_message.trace_id,
+            priority=request_message.priority,
+        )
+
+    @staticmethod
+    def encode_message(message: A2AMessage) -> str:
+        """编码 A2A 消息为 JSON"""
+        data = asdict(message)
+        data["message_type"] = message.message_type.value
+        data["priority"] = message.priority.value
+        data["timestamp"] = message.timestamp.isoformat() if message.timestamp else None
+        return json.dumps(data, ensure_ascii=False)
+
+    @staticmethod
+    def decode_message(message: str) -> A2AMessage:
+        """解码 JSON 为 A2A 消息"""
+        data = json.loads(message)
+        data["message_type"] = MessageType(data["message_type"])
+        data["priority"] = MessagePriority(data["priority"])
+        data["timestamp"] = datetime.fromisoformat(data["timestamp"]) if data["timestamp"] else None
+        return A2AMessage(**data)
 
 
 @dataclass
@@ -180,25 +247,6 @@ class ParallelTaskResult:
     """被跳过的任务 ID 列表"""
     fault_diagnostics: dict[str, FaultDiagnosisInfo] = field(default_factory=dict)
     """故障诊断信息映射 (task_id -> diagnosis)"""
-
-
-@dataclass
-class AgentTaskExecutionRequest:
-    task_id: str
-    query: str
-    agent_id: str
-    preferred_tool: str = ""
-    context: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class AgentTaskExecutionResult:
-    task_id: str
-    agent_id: str
-    success: bool
-    output: str
-    error_type: str = ""
-    latency_ms: float = 0.0
 
 
 @dataclass
