@@ -133,6 +133,14 @@ class DeadLetterQueue:
         except (ConnectionError, TimeoutError, ValueError, redis_asyncio.RedisError) as e:
             logger.error(f"Failed to connect to Redis: {e}")
 
+    def add_sync(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        failure_reason: str,
+    ) -> DLQEntry:
+        return asyncio.run(self.add(task_id, payload, failure_reason))
+
     async def add(self, task_id: str, payload: dict[str, Any], failure_reason: str) -> DLQEntry:
         """添加死信队列条目"""
         with self._lock:
@@ -145,7 +153,7 @@ class DeadLetterQueue:
                 max_retries=self.max_retries,
             )
             self._entries[dlq_id] = entry
-            await self._persist_entry(entry)
+        await self._persist_entry(entry)
         logger.warning(f"Added DLQ entry: {entry}")
         return entry
 

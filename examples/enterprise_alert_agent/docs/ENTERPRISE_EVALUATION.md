@@ -124,11 +124,9 @@ flowchart TB
 - **(已修复)A2A 是空壳**：`A2AProtocol` 只是 set/get 存根，无真实线协议；`from sqlalchemy import Enum` 遮蔽内置 `Enum`。位置：`app/infrastructure/agent/a2a_protocol.py`。
 - **(已修复)死代码/未用依赖**：`passlib[bcrypt]`（无密码哈希使用）、`alert_rules` 从未填充、`admin_jwt_exp_minutes` 未用、`data/` 下 `mock_checkpoint.py`/`mock_memoryStore.py`/`langsmith_demo.py` 不属于应用。
 - **(已修复)同步阻塞**：`time.sleep(backoff)` 在重试路径阻塞线程；psycopg/redis 均为同步驱动。
-- **MCP 客户端**：每次调用新建会话（浪费）；`call_tool` 无超时（可能挂起）；`logger.exception("...%s")` 缺 `e` 参数（格式化 Bug）；工具无客户端 allowlist，模型可见远端全部工具。位置：`app/infrastructure/mcp/mcp_client.py`、`mcp_service.py`。
-- **告警模型**：`Alert.acknowledged_at` 默认 `datetime.utcnow()`（语义上应为 `None`）；`alert_manager.py` 存在重复导入 `from sqlalchemy import true`。
-- **流式降级**：`stream_chat()` 无重试/降级逻辑（单次尝试）；`ModelClient` 重试无指数退避（立即重试）。
 
----
+- **(已修复)告警模型**：`Alert.acknowledged_at` 默认 `datetime.utcnow()`（语义上应为 `None`）；`alert_manager.py` 存在重复导入 `from sqlalchemy import true`。
+
 
 ## 七、系统优点（应保留的资产）✅
 

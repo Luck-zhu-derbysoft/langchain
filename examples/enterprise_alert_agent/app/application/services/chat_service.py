@@ -287,7 +287,7 @@ class ChatService:
                 answer = self._merge_multi_task_results(parallel_results)
                 tool_error_count = parallel_results.failed_tasks
                 for failed_task_id in parallel_results.failed_task_ids:
-                    dead_letter_queue.add(
+                    dead_letter_queue.add_sync(
                         task_id=failed_task_id,
                         payload={"request_id": request_id},
                         failure_reason="parallel_task_execution_failed",

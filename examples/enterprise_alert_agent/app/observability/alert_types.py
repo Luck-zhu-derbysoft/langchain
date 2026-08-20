@@ -32,7 +32,7 @@ class Alert:
     title: str  # 告警标题
     message: str  # 告警消息
     affected_resource: str  # 受影响资源（如 task_id, agent_id）
-    acknowledged_at: datetime = field(default_factory=datetime.utcnow)
+    acknowledged_at: datetime | None = None
     context: dict = field(default_factory=dict)  # 上下文信息
     timestamp: datetime = field(default_factory=datetime.utcnow)
     acknowledged: bool = False  # 是否已确认
