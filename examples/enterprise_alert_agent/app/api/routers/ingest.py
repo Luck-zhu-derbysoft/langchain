@@ -66,7 +66,7 @@ def _parse_upload_to_text(file_name: str, content_bytes: bytes) -> str:
 
 @router.post("/text", response_model=IngestResponse)
 @limiter.limit("5/minute")
-def ingest_text(
+async def ingest_text(
     req: IngestTextRequest, _auth: Annotated[TokenPayload, Depends(require_auth)]
 ) -> IngestResponse:
     """接收纯文本并摄入向量库。

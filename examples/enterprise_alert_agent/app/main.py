@@ -19,6 +19,7 @@ from app.config.tracing_config import (
     get_langsmith_client,
     is_langsmith_enabled,
 )
+from app.infrastructure.agent.a2a_protocol import A2AProtocol
 from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
 from app.infrastructure.agent.intervention_handler import InterventionHandler
@@ -45,8 +46,8 @@ def get_user_rate_limit_key(request) -> str:
             token = auth_header[7:]
             # 简化：用 token 前 20 字符作为用户 key
             return f"user:{token[:20]}"
-    except:
-        pass
+    except Exception:
+        logger.exception("Failed to extract user key")
     # 降级为 IP 限流
     return f"ip:{get_remote_address(request)}"
 
@@ -128,7 +129,8 @@ def create_app() -> FastAPI:
         )
     )
 
-    orchestrator = MultiAgentOrchestrator(agent_registry)
+    a2a_protocol = A2AProtocol()
+    orchestrator = MultiAgentOrchestrator(agent_registry, a2a_protocol)
     app.state.shared_dependencies = {
         "embedding_client": embedding_client,
         "chroma_store": chroma_store,
@@ -160,7 +162,9 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup_checks() -> None:
         from app.infrastructure.mcp.mcp_client import async_init_mcp
+        from app.infrastructure.queue.dlq_handler import dead_letter_queue
 
+        await dead_letter_queue.startup()  # 异步初始化 DLQ，从 Redis 回捞历史数据
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
         app.state.mcp_ready = False

@@ -4,10 +4,10 @@
 将文本转换为向量表示，供向量检索使用。
 """
 
+from langsmith.run_trees import RunTree
 from openai import OpenAI
 
 from app.config.settings import settings
-from langsmith.run_trees import RunTree
 from app.observability.langsmith_tracer import LangSmithTracer
 
 
