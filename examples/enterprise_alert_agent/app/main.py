@@ -290,7 +290,15 @@ def create_app() -> FastAPI:
             close_alert_manager(timeout=settings.graceful_shutdown_timeout_seconds)
         memory_store = dependencies.get("memory")
         if memory_store is not None:
-            memory_store.close()
+            close_memory = getattr(memory_store, "aclose", None)
+            if close_memory is not None:
+                await close_memory()
+            else:
+                memory_store.close()
+        model_client = dependencies.get("model_client")
+        close_model = getattr(model_client, "aclose", None)
+        if close_model is not None:
+            await close_model()
         logger.info("Application shutdown completed")
 
     return app

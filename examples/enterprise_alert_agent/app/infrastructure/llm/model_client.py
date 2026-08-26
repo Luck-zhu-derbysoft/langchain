@@ -1,9 +1,10 @@
+import asyncio
 import time
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
 from langsmith.run_trees import RunTree, logger
-from openai import APIConnectionError, APIError, AuthenticationError, OpenAI
+from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError, OpenAI
 
 from app.config.settings import settings
 from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
@@ -13,6 +14,11 @@ from app.observability.langsmith_tracer import LangSmithTracer
 class ModelClient:
     def __init__(self, tracer: LangSmithTracer) -> None:
         self._client = OpenAI(
+            api_key=settings.dashscope_api_key,
+            base_url=settings.base_url,
+            timeout=settings.request_timeout_seconds,
+        )
+        self._async_client = AsyncOpenAI(
             api_key=settings.dashscope_api_key,
             base_url=settings.base_url,
             timeout=settings.request_timeout_seconds,
@@ -157,7 +163,158 @@ class ModelClient:
             raise ModelRequestError("Model request failed") from exc
         except BudgetExceededError as exc:
             self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise exc
+            raise
+
+    async def achat(
+        self,
+        user_query: str,
+        system_prompt: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        return_message: bool = False,
+        parent_run: RunTree | None = None,
+        _token_counter: list[int] | None = None,
+    ) -> Any:
+        """Asynchronously call the configured model with retry and fallback."""
+        llm_run = self._tracer.start_child(
+            parent_run=parent_run,
+            name="llm.chat_completion.async",
+            run_type="llm",
+            inputs={
+                "user_query": user_query,
+                "system_prompt_length": len(system_prompt),
+                "model": settings.model_name,
+                "tools_count": len(tools) if tools else 0,
+            },
+            tags=["llm", settings.model_name, "async"],
+        )
+        payload: dict[str, Any] = {
+            "model": settings.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query},
+            ],
+            "temperature": 0.1,
+        }
+        if tools:
+            payload["tools"] = tools
+        try:
+            self._circuit_breaker.before_call()
+            completion = None
+            for model_candidate in (settings.model_name, settings.fallback_model_name):
+                payload["model"] = model_candidate
+                for attempt in range(settings.model_max_retries + 1):
+                    try:
+                        completion = await self._async_client.chat.completions.create(**payload)
+                        self._circuit_breaker.record_success()
+                        break
+                    except AuthenticationError:
+                        raise
+                    except Exception as exc:
+                        self._circuit_breaker.record_failure()
+                        if not self._classify_error(exc):
+                            raise
+                        if attempt < settings.model_max_retries:
+                            await asyncio.sleep(
+                                min(
+                                    settings.model_retry_backoff_seconds * (2**attempt),
+                                    8.0,
+                                )
+                            )
+                if completion is not None:
+                    break
+            if completion is None:
+                raise ModelRequestError("Model request failed after retries and fallback attempts.")
+            message = completion.choices[0].message
+            usage = getattr(completion, "usage", None)
+            if usage is not None and _token_counter is not None:
+                _token_counter[0] += (
+                    usage.total_tokens if isinstance(usage.total_tokens, int) else 0
+                )
+                if _token_counter[0] >= settings.max_tokens_per_request:
+                    raise BudgetExceededError("Model request exceeds the maximum token limit.")
+            outputs = {
+                "answer_length": len(message.content or ""),
+                "model": payload["model"],
+                "total_tokens": getattr(usage, "total_tokens", 0) if usage else 0,
+            }
+            self._tracer.end_run(llm_run, outputs=outputs)
+            return message if return_message else message.content or ""
+        except CircuitOpenError as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise ModelRequestError("LLM circuit is open") from exc
+        except AuthenticationError as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise ModelAuthError("Model authentication failed") from exc
+        except (APIConnectionError, APIError) as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise ModelRequestError("Model request failed") from exc
+        except BudgetExceededError as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise
+
+    async def aclose(self) -> None:
+        """Close the asynchronous provider client."""
+        await self._async_client.close()
+
+    async def astream_chat(
+        self,
+        user_query: str,
+        system_prompt: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        parent_run: RunTree | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Asynchronously stream model output without blocking the event loop."""
+        llm_run = self._tracer.start_child(
+            parent_run=parent_run,
+            name="llm.chat_completion.astream",
+            run_type="llm",
+            inputs={"user_query": user_query, "stream": True},
+            tags=["llm", settings.model_name, "async", "stream"],
+        )
+        payload: dict[str, Any] = {
+            "model": settings.model_name,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query},
+            ],
+            "temperature": 0.1,
+        }
+        if tools:
+            payload["tools"] = tools
+        try:
+            self._circuit_breaker.before_call()
+            stream = await self._async_client.chat.completions.create(**payload)
+            self._circuit_breaker.record_success()
+            answer_parts: list[str] = []
+            async for chunk in stream:
+                if not chunk.choices or not chunk.choices[0].delta:
+                    continue
+                piece = getattr(chunk.choices[0].delta, "content", "")
+                if piece:
+                    answer_parts.append(piece)
+                    yield piece
+            self._tracer.end_run(
+                llm_run,
+                outputs={"answer_length": len("".join(answer_parts)), "stream": True},
+            )
+        except CircuitOpenError as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise ModelRequestError("LLM circuit is open") from exc
+        except AuthenticationError as exc:
+            self._circuit_breaker.record_failure()
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise ModelAuthError("Model authentication failed") from exc
+        except (APIConnectionError, APIError) as exc:
+            self._circuit_breaker.record_failure()
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise ModelRequestError("Model request failed") from exc
+        except Exception as exc:
+            self._circuit_breaker.record_failure()
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise
 
     def stream_chat(
         self,

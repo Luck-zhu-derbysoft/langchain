@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -125,6 +126,39 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         if close is not None:
             close()
         self._pg_pool.close()
+
+    async def aclose(self) -> None:
+        """Close storage resources without blocking the event loop."""
+        await asyncio.to_thread(self.close)
+
+    async def aload_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
+        """Load conversation context without blocking the event loop."""
+        return await asyncio.to_thread(self.load_context, scope, max_turns=max_turns)
+
+    async def aappend_turn(
+        self,
+        scope: MemoryScope,
+        *,
+        role: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a conversation turn without blocking the event loop."""
+        await asyncio.to_thread(
+            self.append_turn,
+            scope,
+            role=role,
+            content=content,
+            metadata=metadata,
+        )
+
+    async def asave_summary(self, scope: MemoryScope, summary: str) -> None:
+        """Save a conversation summary without blocking the event loop."""
+        await asyncio.to_thread(self.save_summary, scope, summary)
+
+    async def aclear_memory(self, scope: MemoryScope) -> None:
+        """Clear conversation memory without blocking the event loop."""
+        await asyncio.to_thread(self.clear_memory, scope)
 
     def load_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
         summary = ""

@@ -211,4 +211,5 @@ class AlertManager:
         filtered_alerts = [alert for alert in self.alert_history if alert.timestamp >= cutoff_time]
         return sorted(filtered_alerts, key=lambda a: a.timestamp, reverse=True)[:limit]
 
-    alert_manager = AlertManager()
+
+alert_manager = AlertManager()
