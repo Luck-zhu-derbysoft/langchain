@@ -1,0 +1,47 @@
+# ---- Python 构建产物 ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ---- 虚拟环境（容器内自己重装）----
+.venv/
+venv/
+
+# ---- 密钥与本地配置（P0 教训：绝不入镜像）----
+.env
+.env.*
+!.env.example
+
+# ---- 本地数据（走 volume 挂载，不打进镜像）----
+data/chroma_db/
+data/audit/
+*.sqlite3
+*.db
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 版本控制 ----
+.git/
+.gitignore
+.gitattributes
+
+# ---- 文档与脚本（运行时不需要）----
+docs/
+scripts/dev_experiments/
+tests/
+*.md
+!README.md
+
+# ---- CI / 构建元数据 ----
+.github/
+Dockerfile
+.dockerignore

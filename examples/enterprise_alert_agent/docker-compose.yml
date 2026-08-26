@@ -1,0 +1,131 @@
+# docker-compose.yml
+# 用途：本地一键起 app + Redis + PostgreSQL + (ChromaDB 内嵌，不单独起)
+# 用法：
+#   1) 先备好 .env（拷贝 .env.example，填写密钥；对本地 compose，把 REDIS_HOST/PG_HOST 改为服务名 redis/postgres）
+#   2) docker compose up -d --build
+#   3) curl http://127.0.0.1:8000/health
+#
+# 说明：
+# - ChromaDB 是嵌入式使用（chroma_persist_directory=./data/chroma_db），不需要独立服务
+# - MySQL 通过远程 MCP 网关调用，本 compose 不启动；如需本地 MySQL 请用 profiles=mysql
+# - 所有密钥仅通过 env_file 注入，不写入 compose 文件
+
+name: enterprise-alert-agent
+
+x-app-env: &app-env
+  # 关键：容器内主机名走服务名，覆盖 .env 里可能残留的公网 IP
+  REDIS_HOST: redis
+  PG_HOST: postgres
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: enterprise-alert-agent:dev
+    container_name: eaa-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      <<: *app-env
+    ports:
+      - "8000:8000"
+    volumes:
+      # 持久化 ChromaDB / SQLite / 审计日志
+      - ./data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - eaa-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: eaa-redis
+    restart: unless-stopped
+    # 密码从 .env 注入，避免写死；--requirepass 强制鉴权
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      - --appendonly
+      - "yes"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - eaa-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: eaa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PG_DB:-postgres}
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD is required}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # 首次启动自动执行会话/turn 表建表 SQL（幂等）
+      - ./scripts/init_pg_memory_schema.sql:/docker-entrypoint-initdb.d/00_init_memory_schema.sql:ro
+    networks:
+      - eaa-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # 可选：仅当本地需要 MySQL 时启用 → docker compose --profile mysql up -d
+  mysql:
+    image: mysql:8.4
+    container_name: eaa-mysql
+    profiles: ["mysql"]
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DB:-agent}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - eaa-net
+    healthcheck:
+      test:
+        - CMD
+        - mysqladmin
+        - ping
+        - -h
+        - "127.0.0.1"
+        - -uroot
+        - -p$${MYSQL_ROOT_PASSWORD}
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  eaa-net:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:
+  mysql-data:
