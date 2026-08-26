@@ -78,11 +78,24 @@ class DeadLetterQueue:
         self._entries: dict[str, DLQEntry] = {}
         self.redis = self._build_redis_client()
         self._redis_index_key = "dlq:index"
+        self._worker_task: asyncio.Task[None] | None = None
+        self._stop_event: asyncio.Event | None = None
 
     async def startup(self) -> None:
         """异步初始化：从Redis回捞历史DLQ数据，必须手动await调用"""
         await self._load_existing_entries()
-        asyncio.create_task(self._worker_loop())
+        self._stop_event = asyncio.Event()
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
+    async def close(self) -> None:
+        """Stop the background worker and close the Redis client."""
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._worker_task is not None:
+            await self._worker_task
+            self._worker_task = None
+        if self.redis is not None:
+            await self.redis.aclose()
 
     @staticmethod
     def _build_redis_client() -> redis_asyncio.Redis | None:
@@ -212,7 +225,9 @@ class DeadLetterQueue:
 
     async def _worker_loop(self) -> None:
         """后台线程循环处理死信队列"""
-        while True:
+        if self._stop_event is None:
+            return
+        while not self._stop_event.is_set():
             try:
                 pending_entries = await self.list_pending()
                 for entry in pending_entries:
@@ -225,7 +240,10 @@ class DeadLetterQueue:
                     await self.retry(entry.dlq_id, lambda payload: payload)
             except (ConnectionError, TimeoutError, ValueError) as e:
                 logger.error(f"Error in DLQ worker loop: {e}")
-            await asyncio.sleep(5)  # 每 5 秒检查一次
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=5)
+            except TimeoutError:
+                continue
 
 
 dead_letter_queue = DeadLetterQueue()

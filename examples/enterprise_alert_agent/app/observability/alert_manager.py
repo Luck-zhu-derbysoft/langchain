@@ -25,6 +25,7 @@ class AlertManager:
         self.alert_history: list[Alert] = []  # 告警历史记录
         self._max_history_size = 1000  # 最大历史记录数
         self._dispatch_queue: queue.Queue[Alert] = queue.Queue()
+        self._stop_event = threading.Event()
         self._dispatch_thread = threading.Thread(
             target=self._dispatch_worker, daemon=True, name="AlertDispatchThread"
         )
@@ -67,14 +68,23 @@ class AlertManager:
 
     def _dispatch_worker(self) -> None:
         """告警分发线程"""
-        while True:
-            alert = self._dispatch_queue.get()
+        while not self._stop_event.is_set() or not self._dispatch_queue.empty():
+            try:
+                alert = self._dispatch_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
             try:
                 asyncio.run(self._dispatch_alert(alert))
             except Exception as e:
                 logger.error("Failed to dispatch alert: %s", e)
             finally:
                 self._dispatch_queue.task_done()
+
+    def close(self, timeout: float = 10.0) -> None:
+        """Stop alert dispatch after pending alerts have been processed."""
+        self._stop_event.set()
+        self._dispatch_queue.join()
+        self._dispatch_thread.join(timeout=timeout)
 
     async def _dispatch_alert(self, alert: Alert) -> None:
         """分发告警到各个渠道"""
@@ -200,3 +210,5 @@ class AlertManager:
         cutoff_time = datetime.utcnow() - timedelta(hours=hours)
         filtered_alerts = [alert for alert in self.alert_history if alert.timestamp >= cutoff_time]
         return sorted(filtered_alerts, key=lambda a: a.timestamp, reverse=True)[:limit]
+
+    alert_manager = AlertManager()

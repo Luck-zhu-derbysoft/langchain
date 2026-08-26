@@ -126,6 +126,8 @@ class Settings(BaseSettings):
     admin_jwt_secret: str = ""
     admin_jwt_algorithm: str = "HS256"
     admin_api_key: str = ""
+    max_concurrent_requests: int = 100
+    graceful_shutdown_timeout_seconds: float = 30.0
     alert_webhook_url: str = ""
     alert_webhook_timeout_seconds: float = 5.0
 

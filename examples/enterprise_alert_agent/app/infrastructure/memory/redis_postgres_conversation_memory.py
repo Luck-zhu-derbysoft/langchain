@@ -119,6 +119,13 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         if hasattr(self, "_pg_pool"):
             self._pg_pool.close()
 
+    def close(self) -> None:
+        """Close Redis and PostgreSQL resources during application shutdown."""
+        close = getattr(self._redis_client, "close", None)
+        if close is not None:
+            close()
+        self._pg_pool.close()
+
     def load_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
         summary = ""
         recent_turns: list[dict[str, str]] = []

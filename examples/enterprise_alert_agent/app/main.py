@@ -1,4 +1,5 @@
 # 1. 先导入并执行 LangSmith 配置（必须在所有业务代码之前！）
+import asyncio
 import logging
 import sys
 import time
@@ -35,7 +36,7 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
     RedisPostgresConversationMemoryStore,
 )
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
-from app.observability import alert_manager
+from app.observability.alert_manager import alert_manager
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.observability.logging_config import configure_logging, request_id_context
 from app.observability.metrics import MetricsCollector
@@ -63,6 +64,7 @@ def get_user_rate_limit_key(request) -> str:
 
 
 limiter = Limiter(key_func=get_user_rate_limit_key)
+request_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,22 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         version="0.2.0",
     )
+
+    @app.middleware("http")
+    async def concurrency_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        if not request.url.path.startswith(("/chat", "/ingest", "/admin")):
+            return await call_next(request)
+        try:
+            await asyncio.wait_for(request_semaphore.acquire(), timeout=1.0)
+        except TimeoutError:
+            return JSONResponse(status_code=429, content={"detail": "服务当前繁忙，请稍后重试"})
+        try:
+            return await call_next(request)
+        finally:
+            request_semaphore.release()
 
     @app.middleware("http")
     async def observability_middleware(
@@ -216,7 +234,7 @@ def create_app() -> FastAPI:
         await dead_letter_queue.startup()  # 异步初始化 DLQ，从 Redis 回捞历史数据
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
-        app.state.mcp_ready = False
+        app.state.mcp_ready = not settings.mcp_enabled
 
         if not settings.dashscope_api_key.strip():
             msg = "DASHSCOPE_API_KEY is empty. /chat requests will fail with 401."
@@ -252,6 +270,28 @@ def create_app() -> FastAPI:
             msg = "model request failed during startup probe"
             app.state.model_check_message = msg
             logger.warning(msg)
+
+    @app.on_event("shutdown")
+    async def shutdown_resources() -> None:
+        logger.info("Application shutdown started")
+        dependencies = app.state.shared_dependencies
+        try:
+            from app.infrastructure.queue.dlq_handler import dead_letter_queue
+
+            await asyncio.wait_for(
+                dead_letter_queue.close(),
+                timeout=settings.graceful_shutdown_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.error("DLQ worker did not stop within shutdown timeout")
+        alert_manager_instance = dependencies.get("alert_manager")
+        close_alert_manager = getattr(alert_manager_instance, "close", None)
+        if close_alert_manager is not None:
+            close_alert_manager(timeout=settings.graceful_shutdown_timeout_seconds)
+        memory_store = dependencies.get("memory")
+        if memory_store is not None:
+            memory_store.close()
+        logger.info("Application shutdown completed")
 
     return app
 
