@@ -87,11 +87,11 @@ flowchart LR
 
 | 项 | 目标 | 交付物 |
 |---|---|---|
-| 容器化 | 多阶段构建、非 root 用户、健康探针 | `Dockerfile` + `.dockerignore` |
-| 本地编排 | 一键起全套依赖 | `docker-compose.yml`（Redis/PG/Chroma/app） |
-| 生产编排 | 标准化部署 | K8s manifests（Deployment/Service/HPA/Probe） |
-| 配置分离 | 配置与镜像解耦 | ConfigMap/Secret 挂载，替代散落 `.env` |
-| CI/CD | 自动化质量门禁 | GitHub Actions：lint → 单测 → 构建 → 安全扫描 → 推送 |
+| (已完成)容器化 | 多阶段构建、非 root 用户、健康探针 | `Dockerfile` + `.dockerignore` |
+| (已完成)本地编排 | 一键起全套依赖 | `docker-compose.yml`（Redis/PG/Chroma/app） |
+| (已完成)生产编排 | 标准化部署 | K8s manifests（Deployment/Service/HPA/Probe） |
+| (已完成)配置分离 | 配置与镜像解耦 | ConfigMap/Secret 挂载，替代散落 `.env` |
+| (已完成)CI/CD | 自动化质量门禁 | GitHub Actions：lint → 单测 → 构建 → 安全扫描 → 推送 |
 
 ### B2 可观测性标准化
 

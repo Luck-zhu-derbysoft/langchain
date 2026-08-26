@@ -1,0 +1,117 @@
+name: Enterprise Alert Agent
+
+on:
+  push:
+    branches: [Luke_langchain_soft, master]
+    paths:
+      - "examples/enterprise_alert_agent/**"
+      - ".github/workflows/enterprise_alert_agent.yml"
+  pull_request:
+    paths:
+      - "examples/enterprise_alert_agent/**"
+      - ".github/workflows/enterprise_alert_agent.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enterprise-alert-agent-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WORKDIR: examples/enterprise_alert_agent
+  IMAGE_NAME: enterprise-alert-agent
+  REGISTRY: ghcr.io
+
+jobs:
+  quality:
+    name: Lint, type check, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_ENV: test
+      DASHSCOPE_API_KEY: ci-placeholder
+      ADMIN_JWT_SECRET: ci-placeholder-admin-secret-32-characters
+      MYSQL_PASSWORD: ci-placeholder
+      REDIS_PASSWORD: ci-placeholder
+      PG_PASSWORD: ci-placeholder
+      MODEL_STARTUP_PROBE_ENABLED: "false"
+      MCP_ENABLED: "false"
+      LANGSMITH_TRACING: "false"
+      PYTHONPATH: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Python and uv
+        uses: ./.github/actions/uv_setup
+        with:
+          python-version: "3.11"
+          cache-suffix: enterprise-alert-agent
+          working-directory: ${{ env.WORKDIR }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKDIR }}
+        run: uv sync --extra dev --frozen
+
+      - name: Ruff check
+        working-directory: ${{ env.WORKDIR }}
+        run: uv run ruff check app tests
+
+      - name: Ruff format check
+        working-directory: ${{ env.WORKDIR }}
+        run: uv run ruff format --check app tests
+
+      - name: Mypy
+        working-directory: ${{ env.WORKDIR }}
+        run: uv run mypy app
+
+      - name: Offline smoke tests
+        working-directory: ${{ env.WORKDIR }}
+        run: uv run pytest -q tests/integration -k "health or validation"
+
+  container:
+    name: Build and scan container
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login "$REGISTRY" --username "$GHCR_USERNAME" --password-stdin
+
+      - name: Build image
+        working-directory: ${{ env.WORKDIR }}
+        run: docker build --tag ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Scan image with Trivy
+        run: >-
+          docker run --rm
+          -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.56.2
+          image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed
+          ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Tag image for GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+            "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker tag "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+            "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
+
+      - name: Push image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          docker push "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker push "${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"

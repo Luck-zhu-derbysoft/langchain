@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: enterprise-alert-agent-config
+  namespace: enterprise-alert
+data:
+  APP_ENV: production
+  LOG_LEVEL: INFO
+  APP_HOST: 0.0.0.0
+  APP_PORT: "8000"
+  MODEL_NAME: qwen-plus
+  FALLBACK_MODEL_NAME: qwen-turbo
+  MODEL_STARTUP_PROBE_ENABLED: "true"
+  MCP_ENABLED: "true"
+  LANGSMITH_TRACING: "true"
+  REDIS_HOST: redis.internal
+  REDIS_PORT: "6379"
+  PG_HOST: postgres.internal
+  PG_PORT: "5432"
+  CHROMA_PERSIST_DIRECTORY: /app/data/chroma_db
+  SQLITE_PATH: /app/data/app.db
