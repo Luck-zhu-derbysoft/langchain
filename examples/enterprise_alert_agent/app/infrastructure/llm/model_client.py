@@ -199,12 +199,12 @@ class ModelClient:
         if tools:
             payload["tools"] = tools
         try:
-            self._circuit_breaker.before_call()
             completion = None
             for model_candidate in (settings.model_name, settings.fallback_model_name):
                 payload["model"] = model_candidate
                 for attempt in range(settings.model_max_retries + 1):
                     try:
+                        self._circuit_breaker.before_call()
                         completion = await self._async_client.chat.completions.create(**payload)
                         self._circuit_breaker.record_success()
                         break

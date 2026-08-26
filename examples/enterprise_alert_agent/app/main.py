@@ -299,6 +299,9 @@ def create_app() -> FastAPI:
         close_model = getattr(model_client, "aclose", None)
         if close_model is not None:
             await close_model()
+        from app.infrastructure.mcp.mcp_client import async_close_mcp
+
+        await async_close_mcp()
         logger.info("Application shutdown completed")
 
     return app
