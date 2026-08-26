@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     request_timeout_seconds: int = 30
     model_startup_probe_enabled: bool = True
     model_max_retries: int = 2
+    model_retry_backoff_seconds: float = 0.5
     agent_tool_failure_threshold: int = 2  # 工具连续失败超过此数降级为纯 RAG
     # ========================================================
     # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
@@ -128,6 +129,8 @@ class Settings(BaseSettings):
     admin_api_key: str = ""
     max_concurrent_requests: int = 100
     graceful_shutdown_timeout_seconds: float = 30.0
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_seconds: float = 30.0
     alert_webhook_url: str = ""
     alert_webhook_timeout_seconds: float = 5.0
 

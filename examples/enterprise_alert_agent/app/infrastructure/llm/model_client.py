@@ -1,3 +1,4 @@
+import time
 from collections.abc import Generator
 from typing import Any
 
@@ -5,6 +6,7 @@ from langsmith.run_trees import RunTree, logger
 from openai import APIConnectionError, APIError, AuthenticationError, OpenAI
 
 from app.config.settings import settings
+from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
 from app.observability.langsmith_tracer import LangSmithTracer
 
 
@@ -16,6 +18,11 @@ class ModelClient:
             timeout=settings.request_timeout_seconds,
         )
         self._tracer = tracer
+        self._circuit_breaker = CircuitBreaker(
+            name="llm",
+            failure_threshold=settings.circuit_breaker_failure_threshold,
+            recovery_seconds=settings.circuit_breaker_recovery_seconds,
+        )
 
     def _classify_error(self, error: Exception) -> bool:
         """判断错误是否可重试"""
@@ -72,7 +79,9 @@ class ModelClient:
 
                 for attempt in range(settings.model_max_retries + 1):
                     try:
-                        completion = self._client.chat.completions.create(**payload)
+                        completion = self._circuit_breaker.call(
+                            lambda: self._client.chat.completions.create(**payload)
+                        )
                         break  # 成功则跳出重试循环
                     except AuthenticationError:
                         raise  # 鉴权错误不重试，直接向上抛
@@ -85,6 +94,12 @@ class ModelClient:
                                 attempt + 1,
                                 settings.model_max_retries,
                                 exc,
+                            )
+                            time.sleep(
+                                min(
+                                    settings.model_retry_backoff_seconds * (2**attempt),
+                                    8.0,
+                                )
                             )
                         else:
                             logger.error(
@@ -131,6 +146,9 @@ class ModelClient:
                 return message
             return content or ""
 
+        except CircuitOpenError as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+            raise ModelRequestError("LLM circuit is open") from exc
         except AuthenticationError as exc:
             self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
             raise ModelAuthError("Model authentication failed") from exc
@@ -142,13 +160,16 @@ class ModelClient:
             raise exc
 
     def stream_chat(
-        self,user_query:str,system_prompt:str,*,
-        tools:list[dict[str,Any]] | None = None,
-        parent_run:RunTree | None = None,
-        ) -> Generator[str, None, None]:
+        self,
+        user_query: str,
+        system_prompt: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        parent_run: RunTree | None = None,
+    ) -> Generator[str, None, None]:
 
         # 追踪整个流式聊天请求的生命周期
-        llm_run  = self._tracer.start_child(
+        llm_run = self._tracer.start_child(
             name="llm.chat_completion.stream",
             run_type="llm",
             inputs={
@@ -162,24 +183,26 @@ class ModelClient:
             parent_run=parent_run,
         )
         try:
-            payload:dict[str,Any] = {
+            payload: dict[str, Any] = {
                 "model": settings.model_name,
                 "stream": True,
                 "messages": [
                     {
-                            "role": "system",
-                            "content": system_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": user_query,
-                        },
+                        "role": "system",
+                        "content": system_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": user_query,
+                    },
                 ],
                 "temperature": 0.1,
             }
             if tools:
                 payload["tools"] = tools
-            stream = self._client.chat.completions.create(**payload)
+            stream = self._circuit_breaker.call(
+                lambda: self._client.chat.completions.create(**payload)
+            )
             answer_parts: list[str] = []
             for chunk in stream:
                 if not chunk.choices or not chunk.choices[0].delta:
@@ -200,6 +223,12 @@ class ModelClient:
                     "stream": True,
                 },
             )
+        except CircuitOpenError as exc:
+            self._tracer.end_run(
+                llm_run,
+                error=LangSmithTracer.format_error(exc),
+            )
+            raise ModelRequestError("LLM circuit is open") from exc
         except AuthenticationError as exc:
             self._tracer.end_run(
                 llm_run,
@@ -216,15 +245,19 @@ class ModelClient:
     def probe(self) -> None:
         """Run a lightweight provider check during service startup."""
         try:
-            self._client.chat.completions.create(
-                model=settings.model_name,
-                messages=[
-                    {"role": "system", "content": "health-check"},
-                    {"role": "user", "content": "ping"},
-                ],
-                temperature=0,
-                max_tokens=1,
+            self._circuit_breaker.call(
+                lambda: self._client.chat.completions.create(
+                    model=settings.model_name,
+                    messages=[
+                        {"role": "system", "content": "health-check"},
+                        {"role": "user", "content": "ping"},
+                    ],
+                    temperature=0,
+                    max_tokens=1,
+                )
             )
+        except CircuitOpenError as exc:
+            raise ModelRequestError("LLM circuit is open") from exc
         except AuthenticationError as exc:
             raise ModelAuthError("Model authentication failed") from exc
         except (APIConnectionError, APIError) as exc:
