@@ -113,16 +113,23 @@ class ChatService:
         self, req: ChatRequest, *, parent_run: RunTree | None = None
     ) -> Generator[dict[str, Any], None, None]:
 
+        start_time = time.perf_counter()
+        request_id = str(uuid.uuid4())
+        trace_id = request_id
         ask_run = self.trace.start_child(
             name="service.chat.ask_stream",
             run_type="chain",
             inputs={"query": req.query, "business_context": req.business_context},
             tags=["service", "chat", "stream"],
+            metadata={
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "tenant_id": req.tenant_id,
+                "user_id": req.user_id,
+                "thread_id": req.thread_id,
+            },
             parent_run=parent_run,
         )
-        start_time = time.perf_counter()
-        request_id = str(uuid.uuid4())
-        trace_id = request_id
         # 创建指标采集器
         self.metrics_collector.create_metrics(request_id=request_id)
         logger.info(

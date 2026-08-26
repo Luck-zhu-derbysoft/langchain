@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     retrieval_query_rewrite: bool = True
     retrieval_max_history_turns: int = 2
     retrieval_query_rewrite_enabled: bool = True
-    retrieval_use_bm25: bool = True # 关闭则退化为纯稠密
+    retrieval_use_bm25: bool = True  # 关闭则退化为纯稠密
 
     max_tokens_per_request: int = 200000
     metrics_max_requests: int = 10000
@@ -126,6 +126,8 @@ class Settings(BaseSettings):
     admin_jwt_secret: str = ""
     admin_jwt_algorithm: str = "HS256"
     admin_api_key: str = ""
+    alert_webhook_url: str = ""
+    alert_webhook_timeout_seconds: float = 5.0
 
 
 def _validate_secrets(s: "Settings") -> None:

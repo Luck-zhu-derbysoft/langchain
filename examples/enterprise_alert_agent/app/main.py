@@ -1,14 +1,18 @@
 # 1. 先导入并执行 LangSmith 配置（必须在所有业务代码之前！）
 import logging
 import sys
+import time
+import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -33,7 +37,13 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.observability import alert_manager
 from app.observability.langsmith_tracer import LangSmithTracer
+from app.observability.logging_config import configure_logging, request_id_context
 from app.observability.metrics import MetricsCollector
+from app.observability.prometheus_metrics import (
+    ACTIVE_REQUESTS,
+    REQUEST_COUNT,
+    REQUEST_LATENCY,
+)
 from app.rag.retrieval.retriever import Retriever
 
 
@@ -61,6 +71,7 @@ limiter = Limiter(key_func=get_user_rate_limit_key)
 
 
 def create_app() -> FastAPI:
+    configure_logging(settings.log_level)
     configure_langsmith()
     from app.api.routers.admin import router as admin_router
     from app.api.routers.chat import router as chat_router
@@ -71,6 +82,44 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         version="0.2.0",
     )
+
+    @app.middleware("http")
+    async def observability_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = request_id
+        request_token = request_id_context.set(request_id)
+        started_at = time.perf_counter()
+        ACTIVE_REQUESTS.inc()
+        response: Response | None = None
+        status_code = 500
+
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            elapsed_seconds = time.perf_counter() - started_at
+            REQUEST_COUNT.labels(
+                method=request.method,
+                path=request.url.path,
+                status=str(status_code),
+            ).inc()
+            REQUEST_LATENCY.labels(
+                method=request.method,
+                path=request.url.path,
+            ).observe(elapsed_seconds)
+            ACTIVE_REQUESTS.dec()
+            if response is not None:
+                response.headers["X-Request-ID"] = request_id
+            request_id_context.reset(request_token)
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics() -> Response:
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
     app.include_router(health_router)
     app.include_router(chat_router)
     app.include_router(ingest_router)

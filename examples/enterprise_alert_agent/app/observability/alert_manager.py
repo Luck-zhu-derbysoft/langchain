@@ -5,7 +5,14 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 
+import httpx
+
+from app.config.settings import settings
 from app.observability.alert_types import Alert, AlertSeverity, AlertTypes
+from app.observability.prometheus_metrics import (
+    ALERT_COUNT,
+    ALERT_NOTIFICATION_COUNT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +51,10 @@ class AlertManager:
         )
         self.alerts[alert_id] = alert
         self._add_to_history(alert)
+        ALERT_COUNT.labels(
+            severity=severity.value,
+            alert_type=alert_type.value,
+        ).inc()
         logger.warning(
             "Alert created: severity=%s, title=%s, resource=%s",
             severity.value,
@@ -110,17 +121,33 @@ class AlertManager:
         except Exception as e:
             logger.error("Failed to send SMS alert: %s", e)
 
-    async def _send_internal_notification(self, alert: Alert):
-        """发送内部通知 (如钉钉、Slack)"""
+    async def _send_internal_notification(self, alert: Alert) -> None:
+        """通过配置的 Webhook 发送内部通知。"""
+        if not settings.alert_webhook_url:
+            logger.warning("Alert webhook is not configured: alert_id=%s", alert.alert_id)
+            ALERT_NOTIFICATION_COUNT.labels(channel="webhook", status="skipped").inc()
+            return
+
+        payload = {
+            "alert_id": alert.alert_id,
+            "alert_type": alert.alert_type.value,
+            "severity": alert.severity.value,
+            "title": alert.title,
+            "message": alert.message,
+            "affected_resource": alert.affected_resource,
+            "timestamp": alert.timestamp.isoformat(),
+            "context": alert.context,
+        }
+
         try:
-            logger.info("Sending internal notification for alert %s", alert.alert_id)
-            # TODO: 集成内部通知服务 (如钉钉、Slack)
-            # from services.dingtalk_service import send_message
-            # await send_message(
-            #     text=self._format_dingtalk_message(alert)
-            # )
-        except Exception as e:
-            logger.error("Failed to send internal notification: %s", e)
+            async with httpx.AsyncClient(timeout=settings.alert_webhook_timeout_seconds) as client:
+                response = await client.post(settings.alert_webhook_url, json=payload)
+                response.raise_for_status()
+            ALERT_NOTIFICATION_COUNT.labels(channel="webhook", status="success").inc()
+            logger.info("Alert notification sent: alert_id=%s", alert.alert_id)
+        except httpx.HTTPError:
+            ALERT_NOTIFICATION_COUNT.labels(channel="webhook", status="failure").inc()
+            logger.exception("Alert notification failed: alert_id=%s", alert.alert_id)
 
     @staticmethod
     def _format_alert_email(alert: Alert) -> str:

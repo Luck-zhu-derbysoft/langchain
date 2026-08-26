@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field, replace
 from threading import RLock
 
+from app.observability.prometheus_metrics import CACHE_OPERATIONS, LLM_TOKEN_USAGE
+
 
 @dataclass
 class PerformanceMetrics:
@@ -89,25 +91,28 @@ class MetricsCollector:
                 metrics.latencies_ms.append(latency_ms)
                 metrics.total_time_ms += latency_ms
 
-    def record_token_usage(self, request_id: str, tokens: int):
+    def record_token_usage(self, request_id: str, tokens: int) -> None:
         """记录 token 使用"""
         with self._lock:
             if request_id in self.metrics_store:
                 self.metrics_store[request_id].token_usage += tokens
                 # 假设 1K token = $0.002 (根据实际模型定价调整)
                 self.metrics_store[request_id].estimated_cost_usd += (tokens / 1000) * 0.002
+        LLM_TOKEN_USAGE.labels(model="configured").inc(tokens)
 
-    def record_cache_hit(self, request_id: str):
+    def record_cache_hit(self, request_id: str) -> None:
         """记录缓存命中"""
         with self._lock:
             if request_id in self.metrics_store:
                 self.metrics_store[request_id].cache_hit_count += 1
+        CACHE_OPERATIONS.labels(result="hit").inc()
 
-    def record_cache_miss(self, request_id: str):
+    def record_cache_miss(self, request_id: str) -> None:
         """记录缓存未命中"""
         with self._lock:
             if request_id in self.metrics_store:
                 self.metrics_store[request_id].cache_miss_count += 1
+        CACHE_OPERATIONS.labels(result="miss").inc()
 
     def record_error(self, request_id: str):
         """记录错误"""

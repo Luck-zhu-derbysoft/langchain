@@ -32,6 +32,7 @@ dependencies = [
     "psycopg[binary]>=3.1.0",
     "slowapi>=0.1.10",
     "python-jose[cryptography]>=3.3.0",
+    "prometheus-client>=0.21.0",
 ]
 
 [project.optional-dependencies]

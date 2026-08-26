@@ -93,7 +93,7 @@ flowchart LR
 | (已完成)配置分离 | 配置与镜像解耦 | ConfigMap/Secret 挂载，替代散落 `.env` |
 | (已完成)CI/CD | 自动化质量门禁 | GitHub Actions：lint → 单测 → 构建 → 安全扫描 → 推送 |
 
-### B2 可观测性标准化
+### B2 可观测性标准化(已完成)
 
 - **指标外部化**：接入 Prometheus（`/metrics` 导出）+ Grafana 面板（延迟 P50/P95/P99、Token、错误率、缓存命中、熔断状态），替代仅内存的 `MetricsCollector`。
 - **结构化日志**：全量 JSON 日志（含 `trace_id/tenant_id/request_id`），对接 ELK/Loki。
