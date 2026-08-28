@@ -332,18 +332,18 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         with self._pg_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                    UPDATE conversation_memory_session
-                    SET status = 'deleted', last_message_at = NOW(), version = version + 1
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    """,
+                        UPDATE conversation_memory_session
+                        SET status = 'deleted', last_message_at = NOW(), version = version + 1
+                        WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
+                        """,
                 (scope.tenant_id, scope.user_id, scope.thread_id),
             )
             cur.execute(
                 """
-                    UPDATE conversation_memory_turn
-                    SET is_deleted = TRUE
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    """,
+                        UPDATE conversation_memory_turn
+                        SET is_deleted = TRUE
+                        WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
+                        """,
                 (scope.tenant_id, scope.user_id, scope.thread_id),
             )
         # 删除 Redis 缓存

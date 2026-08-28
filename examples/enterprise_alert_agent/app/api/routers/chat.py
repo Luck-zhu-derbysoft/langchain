@@ -1,5 +1,5 @@
 import json
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -34,7 +34,7 @@ def _get_chat_service(request: Request) -> ChatService:
 
 @router.post("/stream")
 @limiter.limit("10/minute")
-def chat_stream(
+async def chat_stream(
     request: Request,
     req: ChatRequest,
     service: Annotated[ChatService, Depends(_get_chat_service)],
@@ -49,10 +49,10 @@ def chat_stream(
         tags=["chat", "request", "stream"],
     )
 
-    def iter_sse() -> Generator[str, None, None]:
+    async def aiter_sse() -> AsyncGenerator[str, None]:
         stream_request_id: str | None = None
         try:
-            for chunk in service.ask_stream(req, parent_run=root_run):
+            async for chunk in service.aask_stream(req, parent_run=root_run):
                 stream_request_id = str(chunk.get("request_id") or "")
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         finally:
@@ -65,7 +65,7 @@ def chat_stream(
             )
 
     return StreamingResponse(
-        iter_sse(),
+        aiter_sse(),
         media_type="text/event-stream",
         headers={
             "X-Accel-Buffering": "no",
@@ -76,7 +76,7 @@ def chat_stream(
 
 
 @router.post("/memory/clear")
-def clear_memory(
+async def clear_memory(
     request: Request,
     req: ClearRequest,
     service: Annotated[ChatService, Depends(_get_chat_service)],
@@ -89,7 +89,7 @@ def clear_memory(
         user_id=req.user_id,
         thread_id=req.thread_id,
     )
-    service.memory.clear_memory(scope)
+    await service.memory.aclear_memory(scope)
     return {"message": "Memory cleared for the specified thread."}
 
 
@@ -147,9 +147,7 @@ async def submit_intervention(
     }
     """
     result = service._intervention_handler.submit_intervention(
-        task_id=request_id,
-        request=intervention,
-        execute_callback=None
+        task_id=request_id, request=intervention, execute_callback=None
     )
     return {
         "intervention_id": result.intervention_id,

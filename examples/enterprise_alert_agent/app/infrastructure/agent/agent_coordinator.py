@@ -1,6 +1,6 @@
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from app.infrastructure.agent.a2a_protocol import (
@@ -75,6 +75,45 @@ class MultiAgentOrchestrator:
                 trace_id=request_message.trace_id if request_message.trace_id else "",
             )
         except Exception as e:
+            output = str(e)
+            latency_ms = (time.perf_counter() - started) * 1000
+            self.registry.record_failure(request.agent_id)
+            result = AgentTaskExecutionResult(
+                task_id=request.task_id,
+                agent_id=request.agent_id,
+                success=False,
+                output=output,
+                error_type=type(e).__name__,
+                latency_ms=latency_ms,
+                trace_id=request_message.trace_id if request_message.trace_id else "",
+            )
+        response_message = self.protocol.build_task_response(result, request_message)
+        logger.debug("A2A task response: %s", self.protocol.encode_message(response_message))
+        return result
+
+    async def aexecute_with_callback_agent(
+        self,
+        request: AgentTaskExecutionRequest,
+        callback_execute: Callable[[str, str], Awaitable[str]],
+        conversation_id: str | None = None,
+    ) -> AgentTaskExecutionResult:
+        started = time.perf_counter()
+        request_message = self.protocol.build_task_request(request, conversation_id=conversation_id)
+        logger.debug("A2A task dispatch: %s", self.protocol.encode_message(request_message))
+
+        try:
+            output = await callback_execute(request.query, request.agent_id)
+            latency_ms = (time.perf_counter() - started) * 1000
+            self.registry.record_success(request.agent_id)
+            result = AgentTaskExecutionResult(
+                task_id=request.task_id,
+                agent_id=request.agent_id,
+                success=True,
+                output=output,
+                latency_ms=latency_ms,
+                trace_id=request_message.trace_id if request_message.trace_id else "",
+            )
+        except Exception as e:  # noqa: BLE001 - async orchestration isolates per-agent failures
             output = str(e)
             latency_ms = (time.perf_counter() - started) * 1000
             self.registry.record_failure(request.agent_id)
