@@ -29,10 +29,50 @@ def liveness() -> dict[str, str]:
 
 @router.get("/ready")
 def readiness(request: Request) -> dict[str, Any]:
-    checks = {
-        "model": bool(getattr(request.app.state, "model_ready", False)),
-        "mcp": bool(getattr(request.app.state, "mcp_ready", True)),
-    }
+    import psycopg
+    import redis as redis_lib
+
+    checks: dict[str, Any] = {}
+
+    # Redis 实际连通性
+    try:
+        r = redis_lib.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            db=settings.redis_db,
+            password=settings.redis_password,
+            socket_connect_timeout=2,
+        )
+        checks["redis"] = bool(r.ping())
+    except Exception:
+        checks["redis"] = False
+
+    # PostgreSQL 实际连通性
+    try:
+        with psycopg.connect(
+            f"postgresql://{settings.pg_user}:{settings.pg_password}@"
+            f"{settings.pg_host}:{settings.pg_port}/{settings.pg_db}",
+            connect_timeout=2,
+        ) as conn:
+            conn.execute("SELECT 1")
+        checks["postgres"] = True
+    except Exception:
+        checks["postgres"] = False
+
+    # Chroma 实际连通性（复用已实例化的 store，不新建连接）
+    chroma = request.app.state.shared_dependencies.get("chroma_store")
+    try:
+        checks["chroma"] = getattr(chroma, "count", lambda: None)() is not None
+    except Exception:
+        checks["chroma"] = False
+
+    # MCP 连通性
+    from app.infrastructure.mcp.mcp_client import _mcp_client
+
+    checks["mcp"] = _mcp_client is not None and _mcp_client._initialized
+
+    # 模型（启动探活结果）
+    checks["model"] = bool(getattr(request.app.state, "model_ready", False))
     if not all(checks.values()):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

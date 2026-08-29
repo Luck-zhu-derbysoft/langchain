@@ -3,12 +3,16 @@
 对语义相同的查询命中缓存，减少重复 LLM/检索开销。
 L1 为进程内 LRU，L2 为可选的 Redis 共享缓存。
 """
+
 import threading
-from typing import OrderedDict, Any
+from collections import OrderedDict
+from typing import Any
 
 
 class MultiTierCache:
-    def __init__(self, redis_client: Any = None, ttl_seconds: int = 3600, l1_max_size: int = 1000) -> None:
+    def __init__(
+        self, redis_client: Any = None, ttl_seconds: int = 3600, l1_max_size: int = 1000
+    ) -> None:
         self._l1: OrderedDict[str, Any] = OrderedDict()
         self._l1_max_size = l1_max_size
         self._redis = redis_client
@@ -16,8 +20,9 @@ class MultiTierCache:
         self._lock = threading.Lock()
         self._hits = 0
         self._misses = 0
+
     @staticmethod
-    def _make_key(query:str,tenant_id: str = "default") -> str:
+    def _make_key(query: str, tenant_id: str = "default") -> str:
         """生成缓存键"""
         return f"{tenant_id}:{query}"
 
@@ -36,7 +41,7 @@ class MultiTierCache:
             if value is not None:
                 # 将 L2 缓存的结果写入 L1 缓存
                 self._l1[key] = value
-                self._l1.move_to_end(key)  #移到末尾 更新 LRU 顺序
+                self._l1.move_to_end(key)  # 移到末尾 更新 LRU 顺序
                 self._hits += 1
                 if len(self._l1) > self._l1_max_size:
                     self._l1.popitem(last=False)  # 移除头部最旧的条目
@@ -53,4 +58,6 @@ class MultiTierCache:
             self._l1.popitem(last=False)  # 移除最旧的条目
         if self._redis is not None:
             self._redis.set(key, value, ex=self._ttl)
+
+
 multi_tier_cache = MultiTierCache()

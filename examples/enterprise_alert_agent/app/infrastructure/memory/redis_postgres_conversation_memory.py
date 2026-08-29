@@ -1,19 +1,20 @@
-import asyncio
 import json
 import logging
 import re
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
-import redis
+import redis.asyncio as redis_asyncio
 from psycopg import sql
-from psycopg_pool import ConnectionPool
+from psycopg_pool import AsyncConnectionPool
+from redis.exceptions import RedisError
 
 from app.config.settings import settings
+from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class PersistentConversationMemoryStore:
 class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
     def __init__(self) -> None:
         # 初始化 Redis 和 PostgreSQL 连接
-        self._redis_client = redis.Redis(
+        self._redis_client = redis_asyncio.Redis(
             host=settings.redis_host,
             port=settings.redis_port,
             db=settings.redis_db,
@@ -81,11 +82,21 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             socket_connect_timeout=5,
         )
         # PostgreSQL 连接池
-        self._pg_pool = ConnectionPool(
+        self._pg_pool = AsyncConnectionPool(
             conninfo=f"postgresql://{settings.pg_user}:{settings.pg_password}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}",
             min_size=2,
             max_size=10,
             timeout=5,  # `从连接池拿一个连接，拿不到会等待 timeout=5 秒超时抛异常
+        )
+        self._pg_circuit = CircuitBreaker(
+            name="postgresql",
+            failure_threshold=settings.circuit_breaker_failure_threshold,
+            recovery_seconds=settings.circuit_breaker_recovery_seconds,
+        )
+        self._redis_circuit = CircuitBreaker(
+            name="redis",
+            failure_threshold=settings.circuit_breaker_failure_threshold,
+            recovery_seconds=settings.circuit_breaker_recovery_seconds,
         )
 
         self._ttl_days = settings.memory_ttl_days
@@ -98,42 +109,106 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
     def _turns_key(self, scope: MemoryScope) -> str:
         return f"turns:{scope.tenant_id}:{scope.user_id}:{scope.thread_id}"
 
-    @contextmanager
-    def _pg_conn(self) -> Iterator[psycopg.Connection]:
-        # ConnectionPool 只是创建对象，不会预创建连接，第一次getconn才真正建立 pg 连接；
-        # 如果是长驻留服务，建议启动时做一次预热
+    async def awarmup(self) -> None:
+        """启动时等待 PG 连接池填充到 min_size（psycopg_pool>=3.2 无 fill()，用 wait()）。"""
+        try:
+            await self._pg_pool.wait(timeout=5.0)
+        except Exception:
+            logger.warning(
+                "PG connection pool warm-up timed out, connections created lazily",
+                exc_info=True,
+            )
+
+    @asynccontextmanager
+    async def _apg_conn(self) -> AsyncIterator[psycopg.AsyncConnection[Any]]:
+        """异步上下文管理器，获取 PostgreSQL 连接并处理事务和电路断路器。"""
+        self._pg_circuit.before_call()
         conn = None
         try:
-            conn = self._pg_pool.getconn()
+            conn = await self._pg_pool.getconn()
             yield conn
-            conn.commit()
+            await conn.commit()
+            self._pg_circuit.record_success()
         except Exception:
             if conn is not None:
-                conn.rollback()
+                await conn.rollback()
+            self._pg_circuit.record_failure()
             raise
-
         finally:
             if conn is not None:
-                self._pg_pool.putconn(conn)
-
-    def __del__(self) -> None:
-        if hasattr(self, "_pg_pool"):
-            self._pg_pool.close()
-
-    def close(self) -> None:
-        """Close Redis and PostgreSQL resources during application shutdown."""
-        close = getattr(self._redis_client, "close", None)
-        if close is not None:
-            close()
-        self._pg_pool.close()
+                await self._pg_pool.putconn(conn)
 
     async def aclose(self) -> None:
-        """Close storage resources without blocking the event loop."""
-        await asyncio.to_thread(self.close)
+        """Close Redis and PostgreSQL resources during application shutdown."""
+        await self._redis_client.aclose()
+        await self._pg_pool.close()
 
     async def aload_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
-        """Load conversation context without blocking the event loop."""
-        return await asyncio.to_thread(self.load_context, scope, max_turns=max_turns)
+        summary = ""
+        recent_turns: list[dict[str, str]] = []
+        scope_key = self._scope_key(scope)
+        # 1) Redis 读（熔断保护）
+        self._redis_circuit.before_call()
+        try:
+            cached = await self._redis_client.get(scope_key)
+            self._redis_circuit.record_success()
+            if cached:
+                data = json.loads(cached)
+                return MemoryContext(
+                    summary=data.get("summary", ""),
+                    recent_turns=data.get("recent_turns", []),
+                    turn_count=data.get("turn_count", 0),
+                )
+        except CircuitOpenError:
+            logger.warning("Redis circuit open, falling back to PG")
+        except (RedisError, TimeoutError, ValueError):
+            self._redis_circuit.record_failure()
+            logger.warning("Redis cache read failed, falling back to PG: %s", exc_info=True)
+        # 2) PG 读
+        async with self._apg_conn() as conn, conn.cursor() as cur:
+            await cur.execute(
+                sql.SQL(
+                    """
+                    SELECT memory_summary, turn_count FROM conversation_memory_session
+                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
+                    AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW())
+                    """
+                ),
+                (scope.tenant_id, scope.user_id, scope.thread_id),
+            )
+            rows = await cur.fetchone()
+            summary = rows[0] if rows else ""
+            turn_count = rows[1] if rows else 0
+            await cur.execute(
+                sql.SQL(
+                    """
+                    SELECT role, content FROM conversation_memory_turn
+                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
+                    AND is_deleted = FALSE ORDER BY turn_index DESC LIMIT %s
+                    """
+                ),
+                (scope.tenant_id, scope.user_id, scope.thread_id, max_turns * 2),
+            )
+            recent_rows = list(reversed((await cur.fetchall()) or []))
+            recent_turns = [
+                {"role": role, "content": self._sanitize(content)} for role, content in recent_rows
+            ]
+
+        # 3) 回写 Redis 缓存（熔断保护）
+        self._redis_circuit.before_call()
+        try:
+            cache_data = {
+                "summary": summary,
+                "recent_turns": recent_turns,
+                "turn_count": turn_count,
+            }
+            await self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
+            self._redis_circuit.record_success()
+        except (RedisError, TimeoutError, ValueError):
+            self._redis_circuit.record_failure()
+            logger.warning("Redis cache write-back failed: %s", exc_info=True)
+
+        return MemoryContext(summary=summary, recent_turns=recent_turns, turn_count=turn_count)
 
     async def aappend_turn(
         self,
@@ -143,167 +218,78 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Append a conversation turn without blocking the event loop."""
-        await asyncio.to_thread(
-            self.append_turn,
-            scope,
-            role=role,
-            content=content,
-            metadata=metadata,
-        )
-
-    async def asave_summary(self, scope: MemoryScope, summary: str) -> None:
-        """Save a conversation summary without blocking the event loop."""
-        await asyncio.to_thread(self.save_summary, scope, summary)
-
-    async def aclear_memory(self, scope: MemoryScope) -> None:
-        """Clear conversation memory without blocking the event loop."""
-        await asyncio.to_thread(self.clear_memory, scope)
-
-    def load_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
-        summary = ""
-        recent_turns: list[dict[str, str]] = []
-
-        # 从 Redis 加载近期对话
-        scope_key = self._scope_key(scope)
-        try:
-            cached = self._redis_client.get(scope_key)  # 触发连接检查
-            if cached:
-                data = json.loads(cached)
-                return MemoryContext(
-                    summary=data.get("summary", ""),
-                    recent_turns=data.get("recent_turns", []),
-                    turn_count=data.get("turn_count", 0),
-                )
-        except Exception:
-            logger.warning("Redis cache read failed, falling back to PG: %s", exc_info=True)
-        # 如果 Redis 中没有有效缓存，则从 PostgreSQL 加载近期对话
-        with self._pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    sql.SQL(
-                        """
-                        SELECT memory_summary, turn_count FROM conversation_memory_session
-                        WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                        and status = 'active' and (expires_at IS NULL OR expires_at > NOW())
-                        """
-                    ),
-                    (scope.tenant_id, scope.user_id, scope.thread_id),
-                )
-                rows = cur.fetchone()
-                summary = rows[0] if rows else ""
-                turn_count = rows[1] if rows else 0
-                # 加载近期对话
-                cur.execute(
-                    sql.SQL(
-                        """
-                        SELECT role, content FROM conversation_memory_turn
-                        WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                        AND is_deleted = FALSE ORDER BY turn_index DESC
-                        LIMIT %s
-                        """
-                    ),
-                    (scope.tenant_id, scope.user_id, scope.thread_id, max_turns * 2),
-                )
-                recent_rows = list(reversed(cur.fetchall() or []))
-            recent_turns = [
-                {"role": role, "content": self._sanitize(content)} for role, content in recent_rows
-            ]
-
-            try:
-                # 将加载的上下文缓存到 Redis，设置 TTL
-                cache_data = {
-                    "summary": summary,
-                    "recent_turns": recent_turns,
-                    "turn_count": turn_count,
-                }
-                self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
-            except Exception:
-                pass
-        return MemoryContext(summary=summary, recent_turns=recent_turns, turn_count=turn_count)
-
-    def append_turn(
-        self, scope: MemoryScope, *, role: str, content: str, metadata: dict[str, Any] | None = None
-    ) -> None:
         safe_content = self._sanitize(content) if self._redact_pii else content
-        expires_at = datetime.utcnow() + timedelta(days=self._ttl_days)
+        expires_at = datetime.now(UTC) + timedelta(days=self._ttl_days)
         scope_key = self._scope_key(scope)
-
-        # 将新对话追加到 PostgreSQL 中，并更新 Redis 缓存
-        with self._pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO conversation_memory_session
-                    (tenant_id, user_id, thread_id, memory_summary, turn_count, status, last_message_at, expires_at)
-                    VALUES (%s, %s, %s, '', 0, 'active', NOW(), %s)
-                    ON CONFLICT (tenant_id, user_id, thread_id)
-                    DO UPDATE SET
-                        last_message_at = NOW(),
-                        expires_at = EXCLUDED.expires_at
-                    """,
-                    (scope.tenant_id, scope.user_id, scope.thread_id, expires_at),
-                )
-
-                cur.execute(
-                    """
-                    SELECT turn_count FROM conversation_memory_session
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    FOR UPDATE
-                    """,
-                    (scope.tenant_id, scope.user_id, scope.thread_id),
-                )
-                row = cur.fetchone()
-                next_turn = (row[0] if row else 0) + 1
-
-                cur.execute(
-                    """
-                    INSERT INTO conversation_memory_turn
-                    (tenant_id, user_id, thread_id, turn_index, role, content, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        scope.tenant_id,
-                        scope.user_id,
-                        scope.thread_id,
-                        next_turn,
-                        role,
-                        safe_content,
-                        json.dumps(metadata or {}, ensure_ascii=False),
-                    ),
-                )
-
-                cur.execute(
-                    """
-                    UPDATE conversation_memory_session
-                    SET turn_count = %s, last_message_at = NOW(), version = version + 1
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    """,
-                    (next_turn, scope.tenant_id, scope.user_id, scope.thread_id),
-                )
-        # 更新 Redis 缓存（如果存在）
-        scope_key = self._scope_key(scope)
+        # PG 写
+        async with self._apg_conn() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO conversation_memory_session
+                (tenant_id, user_id, thread_id, memory_summary, turn_count, status, last_message_at, expires_at)
+                VALUES (%s, %s, %s, '', 0, 'active', NOW(), %s)
+                ON CONFLICT (tenant_id, user_id, thread_id)
+                DO UPDATE SET last_message_at = NOW(), expires_at = EXCLUDED.expires_at
+                """,
+                (scope.tenant_id, scope.user_id, scope.thread_id, expires_at),
+            )
+            await cur.execute(
+                """
+                SELECT turn_count FROM conversation_memory_session
+                WHERE tenant_id = %s AND user_id = %s AND thread_id = %s FOR UPDATE
+                """,
+                (scope.tenant_id, scope.user_id, scope.thread_id),
+            )
+            row = await cur.fetchone()
+            next_turn = (row[0] if row else 0) + 1
+            await cur.execute(
+                """
+                INSERT INTO conversation_memory_turn
+                (tenant_id, user_id, thread_id, turn_index, role, content, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    scope.tenant_id,
+                    scope.user_id,
+                    scope.thread_id,
+                    next_turn,
+                    role,
+                    safe_content,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            await cur.execute(
+                """
+                UPDATE conversation_memory_session
+                SET turn_count = %s, last_message_at = NOW(), version = version + 1
+                WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
+                """,
+                (next_turn, scope.tenant_id, scope.user_id, scope.thread_id),
+            )
+        # Redis 写（如果存在）
+        # Redis 缓存更新（熔断保护）
+        self._redis_circuit.before_call()
         try:
-            cached = self._redis_client.get(scope_key)  # 触发连接检查
-            if cached:
-                cache_data = json.loads(cached)
-            else:
-                cache_data = {"summary": "", "recent_turns": []}
+            cached = await self._redis_client.get(scope_key)
+            cache_data = json.loads(cached) if cached else {"summary": "", "recent_turns": []}
             turns = cache_data.get("recent_turns", [])
             turns.append({"role": role, "content": safe_content})
-            if len(turns) > settings.cache_recent_turns_limit:  # 假设我们只缓存最近N轮对话
+            if len(turns) > settings.cache_recent_turns_limit:
                 turns = turns[-settings.cache_recent_turns_limit :]
             cache_data["recent_turns"] = turns
             cache_data["turn_count"] = next_turn
-            self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
-
-        except Exception as e:
+            await self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
+            self._redis_circuit.record_success()
+        except (RedisError, TimeoutError, ValueError) as e:
+            self._redis_circuit.record_failure()
             logger.warning("Redis cache update failed: %s", e)
 
-    def save_summary(self, scope: MemoryScope, summary: str) -> None:
+    async def asave_summary(self, scope: MemoryScope, summary: str) -> None:
         safe_summary = self._sanitize(summary) if self._redact_pii else summary
-        with self._pg_conn() as conn, conn.cursor() as cur:
-            cur.execute(
+        scope_key = self._scope_key(scope)
+
+        async with self._apg_conn() as conn, conn.cursor() as cur:
+            await cur.execute(
                 """
                     UPDATE conversation_memory_session
                     SET memory_summary = %s, last_message_at = NOW(), version = version + 1
@@ -312,45 +298,50 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                     """,
                 (safe_summary, scope.tenant_id, scope.user_id, scope.thread_id),
             )
-            row = cur.fetchone()
+            row = await cur.fetchone()
             turn_count = row[0] if row else 0
-        # 更新 Redis 缓存（如果存在）
-        scope_key = self._scope_key(scope)
+
+        self._redis_circuit.before_call()
         try:
-            cached = self._redis_client.get(scope_key)  # 触发连接检查
-            if cached:
-                cache_data = json.loads(cached)
-            else:
-                cache_data = {"summary": "", "recent_turns": [], "turn_count": 0}
+            cached = await self._redis_client.get(scope_key)
+            cache_data = (
+                json.loads(cached)
+                if cached
+                else {"summary": "", "recent_turns": [], "turn_count": 0}
+            )
             cache_data["summary"] = safe_summary
             cache_data["turn_count"] = turn_count
-            self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
-        except Exception as e:
+            await self._redis_client.setex(scope_key, self._cache_ttl, json.dumps(cache_data))
+            self._redis_circuit.record_success()
+        except (RedisError, TimeoutError, ValueError) as e:
+            self._redis_circuit.record_failure()
             logger.warning("Redis cache write failed: %s", e)
 
-    def clear_memory(self, scope: MemoryScope) -> None:
-        with self._pg_conn() as conn, conn.cursor() as cur:
-            cur.execute(
+    async def aclear_memory(self, scope: MemoryScope) -> None:
+        async with self._apg_conn() as conn, conn.cursor() as cur:
+            await cur.execute(
                 """
-                        UPDATE conversation_memory_session
-                        SET status = 'deleted', last_message_at = NOW(), version = version + 1
-                        WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                        """,
+                    UPDATE conversation_memory_session
+                    SET status = 'deleted', last_message_at = NOW(), version = version + 1
+                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
+                    """,
                 (scope.tenant_id, scope.user_id, scope.thread_id),
             )
-            cur.execute(
+            await cur.execute(
                 """
-                        UPDATE conversation_memory_turn
-                        SET is_deleted = TRUE
-                        WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                        """,
+                    UPDATE conversation_memory_turn
+                    SET is_deleted = TRUE
+                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
+                    """,
                 (scope.tenant_id, scope.user_id, scope.thread_id),
             )
-        # 删除 Redis 缓存
         scope_key = self._scope_key(scope)
+        self._redis_circuit.before_call()
         try:
-            self._redis_client.delete(scope_key)
-        except Exception as e:
+            await self._redis_client.delete(scope_key)
+            self._redis_circuit.record_success()
+        except (RedisError, TimeoutError, ValueError) as e:
+            self._redis_circuit.record_failure()
             logger.warning("Redis cache delete failed: %s", e)
 
     def _sanitize(self, text: str) -> str:

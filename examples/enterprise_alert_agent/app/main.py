@@ -231,6 +231,7 @@ def create_app() -> FastAPI:
         from app.infrastructure.mcp.mcp_client import async_init_mcp
         from app.infrastructure.queue.dlq_handler import dead_letter_queue
 
+        await memory.awarmup()  # 异步预热 Redis/PostgreSQL 连接池
         await dead_letter_queue.startup()  # 异步初始化 DLQ，从 Redis 回捞历史数据
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
@@ -274,6 +275,12 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown_resources() -> None:
         logger.info("Application shutdown started")
+        # 1) 排空在途请求：等全局闸门完全空闲（或超时），期间停止接收新请求
+        if not await _drain_inflight(request_semaphore, settings.graceful_shutdown_timeout_seconds):
+            logger.warning("Not all in-flight requests completed before shutdown timeout")
+        # 2) 关闭各类资源
+        audit_logger.flush_to_file()  # 确保审计日志落盘
+
         dependencies = app.state.shared_dependencies
         try:
             from app.infrastructure.queue.dlq_handler import dead_letter_queue
@@ -305,6 +312,25 @@ def create_app() -> FastAPI:
         logger.info("Application shutdown completed")
 
     return app
+
+
+async def _drain_inflight(sem: asyncio.Semaphore, timeout: float) -> bool:
+    """排空在途请求：直到能连续拿到 max_concurrent_requests 个许可（= 无在途请求）。"""
+    deadline = time.monotonic() + timeout
+    acquired = 0
+    while time.monotonic() < deadline:
+        if sem.acquire_nowait():  # type: ignore # 公开 API，返回 bool，不抛异常
+            acquired += 1
+            if acquired >= settings.max_concurrent_requests:
+                for _ in range(acquired):
+                    sem.release()
+                return True
+        else:
+            acquired = 0  # 还有请求占用许可，未排空，清零重来
+        await asyncio.sleep(0.05)
+    for _ in range(acquired):
+        sem.release()
+    return False
 
 
 app = create_app()

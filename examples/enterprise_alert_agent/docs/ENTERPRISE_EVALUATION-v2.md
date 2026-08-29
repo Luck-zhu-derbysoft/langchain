@@ -100,7 +100,7 @@ flowchart LR
 - **告警闭环**：`AlertManager` 接入真实通道（钉钉/企业微信/Webhook/PagerDuty），与 Prometheus Alertmanager 打通。
 - **追踪贯通**：LangSmith `trace_id` 与日志、指标三者可关联下钻。
 
-### B3 弹性与高可用(待确认是否改造完成？)
+### B3 弹性与高可用(已完成)
 
 - **优雅停机**：`lifespan` 关闭时排空进行中请求、flush 审计、关闭连接池。
 - **全局熔断与背压**：LLM/MCP/DB 各依赖独立熔断 + 全局并发闸门，过载返回 429。

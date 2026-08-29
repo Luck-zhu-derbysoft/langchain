@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     circuit_breaker_recovery_seconds: float = 30.0
     alert_webhook_url: str = ""
     alert_webhook_timeout_seconds: float = 5.0
+    
 
 
 def _validate_secrets(s: "Settings") -> None:

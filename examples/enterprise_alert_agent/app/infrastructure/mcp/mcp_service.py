@@ -6,6 +6,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
 from app.config.settings import settings
+from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,11 @@ class RemoteMCPClient:
     def __init__(self) -> None:
         self._tools_meta: list[dict[str, Any]] = []
         self._initialized = False
+        self._circuit_breaker = CircuitBreaker(
+            name="mcp",
+            failure_threshold=settings.circuit_breaker_failure_threshold,
+            recovery_seconds=settings.circuit_breaker_recovery_seconds,
+        )
 
     async def initialize(self) -> bool:
         if self._initialized:
@@ -55,6 +61,17 @@ class RemoteMCPClient:
             return False
 
     async def call_tool(self, tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            self._circuit_breaker.before_call()
+        except CircuitOpenError:
+            logger.warning("MCP circuit open, blocking tool call: %s", tool_name)
+            return {
+                "status": "error",
+                "data": [],
+                "row_count": 0,
+                "error_code": "circuit_open",
+                "message": "MCP circuit is open, tool call blocked",
+            }
 
         headers: dict[str, str] = {}
         if settings.mcp_api_key:
@@ -79,6 +96,7 @@ class RemoteMCPClient:
                     texts = [
                         getattr(item, "text", str(item)) for item in content if item is not None
                     ]
+                    self._circuit_breaker.record_success()
                     return {
                         "status": "success",
                         "data": [{"result": "\n".join(texts)}],
@@ -86,6 +104,7 @@ class RemoteMCPClient:
                         "error_code": "",
                         "message": "ok",
                     }
+                self._circuit_breaker.record_success()
                 return {
                     "status": "success",
                     "data": [],
@@ -94,7 +113,8 @@ class RemoteMCPClient:
                     "message": "ok",
                 }
         except Exception as e:
-            logger.exception("MCP client call failed: %s")
+            self._circuit_breaker.record_failure()
+            logger.exception("MCP client call failed: %s", tool_name)
             return {
                 "status": "error",
                 "data": [],
