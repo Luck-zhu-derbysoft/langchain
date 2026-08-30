@@ -12,7 +12,7 @@
 ### 1. 异步与并发（岗位：核心1）
 | 技能点 | 项目现状 | 落地练习 | 优先级 |
 |---|---|---|---|
-| asyncio / 线程边界 | 🔴 线程里调 `asyncio.create_task` 报错 | 修 `alert_manager` P0 BUG | 🔴 |
+(已修复)| asyncio / 线程边界 | 🔴 线程里调 `asyncio.create_task` 报错 | 修 `alert_manager` P0 BUG | 🔴 |
 | 线程安全 / 共享状态 | 指标/注册表无锁 | 加锁 + 环形缓冲 | 🔴 |
 | 异步驱动 / 连接池 | ✅ 已异步化 | 画时序图复盘 | 🟡 |
 

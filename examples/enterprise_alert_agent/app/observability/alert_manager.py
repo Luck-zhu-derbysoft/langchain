@@ -91,18 +91,17 @@ class AlertManager:
         # 根据严重程度和规则决定分发方式
         if alert.severity == AlertSeverity.CRITICAL:
             # 严重级别告警：邮件 + 短信 + 内部通知
-            await self._send_email(alert)
-            await self._send_sms(alert)
-            await self._send_internal_notification(alert)
-
+            await asyncio.gather(
+                self._send_email(alert),
+                self._send_sms(alert),
+                self._send_internal_notification(alert),
+            )
         elif alert.severity == AlertSeverity.WARNING:
             # 警告级别：邮件 + 内部通知
-            await self._send_email(alert)
-            await self._send_internal_notification(alert)
-
+            await asyncio.gather(self._send_email(alert), self._send_internal_notification(alert))
         else:
             # 信息级别：仅内部通知
-            await self._send_internal_notification(alert)
+            await asyncio.gather(self._send_internal_notification(alert))
 
     async def _send_email(self, alert: Alert):
         """发送邮件告警 (示例实现)"""
