@@ -3,7 +3,9 @@ import logging
 import queue
 import threading
 import uuid
-from datetime import datetime, timedelta
+from collections import deque
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -22,8 +24,9 @@ class AlertManager:
 
     def __init__(self) -> None:
         self.alerts: dict[str, Alert] = {}  # 存储告警事件
-        self.alert_history: list[Alert] = []  # 告警历史记录
         self._max_history_size = 1000  # 最大历史记录数
+        self.alert_history: deque[Alert] = deque(maxlen=self._max_history_size)  # 自带有界
+        self._lock = threading.Lock()  # 用于线程安全的锁
         self._dispatch_queue: queue.Queue[Alert] = queue.Queue()
         self._stop_event = threading.Event()
         self._dispatch_thread = threading.Thread(
@@ -50,8 +53,9 @@ class AlertManager:
             affected_resource=affected_resource,
             context=context or {},
         )
-        self.alerts[alert_id] = alert
-        self._add_to_history(alert)
+        with self._lock:
+            self.alerts[alert_id] = alert
+            self.alert_history.append(alert)  # deque 自动丢弃最旧，替代手写截断
         ALERT_COUNT.labels(
             severity=severity.value,
             alert_type=alert_type.value,
@@ -75,7 +79,8 @@ class AlertManager:
                 continue
             try:
                 asyncio.run(self._dispatch_alert(alert))
-            except Exception as e:
+            except (httpx.HTTPError, TimeoutError, OSError, RuntimeError) as e:
+                # 分发线程兜底：只捕获网络/超时/异步类异常，避免单条告警异常杀死线程
                 logger.error("Failed to dispatch alert: %s", e)
             finally:
                 self._dispatch_queue.task_done()
@@ -114,7 +119,7 @@ class AlertManager:
             #     subject=f"[{alert.severity.value.upper()}] {alert.title}",
             #     body=self._format_alert_email(alert)
             # )
-        except Exception as e:
+        except (httpx.HTTPError, TimeoutError, OSError) as e:
             logger.error("Failed to send email alert: %s", e)
 
     async def _send_sms(self, alert: Alert):
@@ -127,7 +132,7 @@ class AlertManager:
             #     phone="+8613800138000",
             #     message=f"[{alert.severity.value.upper()}] {alert.title}: {alert.message[:50]}"
             # )
-        except Exception as e:
+        except (httpx.HTTPError, TimeoutError, OSError) as e:
             logger.error("Failed to send SMS alert: %s", e)
 
     async def _send_internal_notification(self, alert: Alert) -> None:
@@ -173,21 +178,17 @@ class AlertManager:
         {alert.context}
         """
 
-    def _add_to_history(self, alert: Alert) -> None:
-        self.alert_history.append(alert)
-        if len(self.alert_history) > self._max_history_size:
-            self.alert_history = self.alert_history[-self._max_history_size :]  # 保留最新的历史记录
-
     def acknowledge_alert(self, alert_id: str, acknowledged_by: str) -> bool:
         """确认告警"""
-        alert = self.alerts.get(alert_id)
-        if not alert:
-            logger.warning("Alert %s not found for acknowledgment", alert_id)
-            return False
-        alert.acknowledged = True
-        alert.acknowledged_by = acknowledged_by
-        alert.acknowledged_at = datetime.utcnow()
-        logger.info("Alert %s acknowledged by %s", alert_id, acknowledged_by)
+        with self._lock:
+            alert = self.alerts.get(alert_id)
+            if not alert:
+                logger.warning("Alert %s not found for acknowledgment", alert_id)
+                return False
+            alert.acknowledged = True
+            alert.acknowledged_by = acknowledged_by
+            alert.acknowledged_at = datetime.now(UTC)
+            logger.info("Alert %s acknowledged by %s", alert_id, acknowledged_by)
         return True
 
     def get_alerts(
@@ -197,7 +198,8 @@ class AlertManager:
         limit: int = 100,
     ) -> list[Alert]:
         """获取指定告警"""
-        alerts = list(self.alerts.values())
+        with self._lock:
+            alerts = deepcopy(list(self.alerts.values()))  # 读时取快照，返回副本
         if alert_type:
             alerts = [alert for alert in alerts if alert.alert_type == alert_type]
         if severity:
@@ -206,8 +208,10 @@ class AlertManager:
 
     def get_alert_history(self, hours: int = 24, limit: int = 1000) -> list[Alert]:
         """获取告警历史记录"""
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-        filtered_alerts = [alert for alert in self.alert_history if alert.timestamp >= cutoff_time]
+        with self._lock:
+            history = deepcopy(list(self.alert_history))  # 读时取快照
+        cutoff_time = datetime.now(UTC) - timedelta(hours=hours)
+        filtered_alerts = [alert for alert in history if alert.timestamp >= cutoff_time]
         return sorted(filtered_alerts, key=lambda a: a.timestamp, reverse=True)[:limit]
 
 

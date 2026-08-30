@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 
 
@@ -34,6 +34,6 @@ class Alert:
     affected_resource: str  # 受影响资源（如 task_id, agent_id）
     acknowledged_at: datetime | None = None
     context: dict = field(default_factory=dict)  # 上下文信息
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     acknowledged: bool = False  # 是否已确认
     acknowledged_by: str = ""  # 确认者
