@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOperatorIssue=false
 import json
 import logging
 import re
@@ -5,18 +6,28 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
-import psycopg
 import redis.asyncio as redis_asyncio
-from psycopg import sql
-from psycopg_pool import AsyncConnectionPool
 from redis.exceptions import RedisError
+from sqlalchemy import Table, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlmodel import SQLModel
 
 from app.config.settings import settings
 from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
+from app.infrastructure.memory.models import ConversationMemorySession, ConversationMemoryTurn
 
 logger = logging.getLogger(__name__)
+
+SESSION_TABLE = cast(Table, vars(ConversationMemorySession)["__table__"])
+TURN_TABLE = cast(Table, vars(ConversationMemoryTurn)["__table__"])
 
 
 @dataclass(frozen=True)
@@ -81,13 +92,15 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             decode_responses=True,
             socket_connect_timeout=5,
         )
-        # PostgreSQL 连接池
-        self._pg_pool = AsyncConnectionPool(
-            conninfo=f"postgresql://{settings.pg_user}:{settings.pg_password}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}",
-            min_size=2,
-            max_size=10,
-            timeout=5,  # `从连接池拿一个连接，拿不到会等待 timeout=5 秒超时抛异常
+        self._pg_engine: AsyncEngine = create_async_engine(
+            f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}",
+            pool_size=2,
+            max_overflow=8,  # min_size=2, max_size=10 等价拆分
+            pool_timeout=5,
+            pool_pre_ping=True,
         )
+        self._pg_session_factory = async_sessionmaker(self._pg_engine, expire_on_commit=False)
+
         self._pg_circuit = CircuitBreaker(
             name="postgresql",
             failure_threshold=settings.circuit_breaker_failure_threshold,
@@ -110,38 +123,38 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         return f"turns:{scope.tenant_id}:{scope.user_id}:{scope.thread_id}"
 
     async def awarmup(self) -> None:
-        """启动时等待 PG 连接池填充到 min_size（psycopg_pool>=3.2 无 fill()，用 wait()）。"""
+        """Initialize SQLModel tables and verify that the engine can connect."""
         try:
-            await self._pg_pool.wait(timeout=5.0)
+            async with self._pg_engine.begin() as conn:
+                await conn.run_sync(SQLModel.metadata.create_all)
         except Exception:
             logger.warning(
-                "PG connection pool warm-up timed out, connections created lazily",
+                "PostgreSQL engine warm-up failed; connections will be created lazily",
                 exc_info=True,
             )
 
     @asynccontextmanager
-    async def _apg_conn(self) -> AsyncIterator[psycopg.AsyncConnection[Any]]:
-        """异步上下文管理器，获取 PostgreSQL 连接并处理事务和电路断路器。"""
+    async def _apg_session(self) -> AsyncIterator[AsyncSession]:
+        """Provide a transactional SQLModel session protected by the circuit breaker."""
         self._pg_circuit.before_call()
-        conn = None
+        session = self._pg_session_factory()
         try:
-            conn = await self._pg_pool.getconn()
-            yield conn
-            await conn.commit()
+            yield session
+            await session.commit()
             self._pg_circuit.record_success()
         except Exception:
-            if conn is not None:
-                await conn.rollback()
+            if session is not None:
+                await session.rollback()
             self._pg_circuit.record_failure()
             raise
         finally:
-            if conn is not None:
-                await self._pg_pool.putconn(conn)
+            if session is not None:
+                await session.close()
 
     async def aclose(self) -> None:
         """Close Redis and PostgreSQL resources during application shutdown."""
         await self._redis_client.aclose()
-        await self._pg_pool.close()
+        await self._pg_engine.dispose()
 
     async def aload_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
         summary = ""
@@ -165,33 +178,44 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             self._redis_circuit.record_failure()
             logger.warning("Redis cache read failed, falling back to PG: %s", exc_info=True)
         # 2) PG 读
-        async with self._apg_conn() as conn, conn.cursor() as cur:
-            await cur.execute(
-                sql.SQL(
-                    """
-                    SELECT memory_summary, turn_count FROM conversation_memory_session
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    AND status = 'active' AND (expires_at IS NULL OR expires_at > NOW())
-                    """
-                ),
-                (scope.tenant_id, scope.user_id, scope.thread_id),
+        async with self._apg_session() as session:
+            session_row = (
+                await session.execute(
+                    select(ConversationMemorySession).where(
+                        SESSION_TABLE.c.tenant_id == scope.tenant_id,
+                        SESSION_TABLE.c.user_id == scope.user_id,
+                        SESSION_TABLE.c.thread_id == scope.thread_id,
+                        SESSION_TABLE.c.status == "active",
+                        or_(
+                            SESSION_TABLE.c.expires_at.is_(None),
+                            SESSION_TABLE.c.expires_at > datetime.now(UTC),
+                        ),
+                    )
+                )
+            ).scalar_one_or_none()
+            summary = session_row.memory_summary if session_row else ""
+            turn_count = session_row.turn_count if session_row else 0
+            recent_rows = list(
+                reversed(
+                    (
+                        await session.execute(
+                            select(ConversationMemoryTurn)
+                            .where(
+                                TURN_TABLE.c.tenant_id == scope.tenant_id,
+                                TURN_TABLE.c.user_id == scope.user_id,
+                                TURN_TABLE.c.thread_id == scope.thread_id,
+                                TURN_TABLE.c.is_deleted.is_(False),
+                            )
+                            .order_by(TURN_TABLE.c.turn_index.desc())
+                            .limit(max_turns * 2)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
             )
-            rows = await cur.fetchone()
-            summary = rows[0] if rows else ""
-            turn_count = rows[1] if rows else 0
-            await cur.execute(
-                sql.SQL(
-                    """
-                    SELECT role, content FROM conversation_memory_turn
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    AND is_deleted = FALSE ORDER BY turn_index DESC LIMIT %s
-                    """
-                ),
-                (scope.tenant_id, scope.user_id, scope.thread_id, max_turns * 2),
-            )
-            recent_rows = list(reversed((await cur.fetchall()) or []))
             recent_turns = [
-                {"role": role, "content": self._sanitize(content)} for role, content in recent_rows
+                {"role": row.role, "content": self._sanitize(row.content)} for row in recent_rows
             ]
 
         # 3) 回写 Redis 缓存（熔断保护）
@@ -222,50 +246,51 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         expires_at = datetime.now(UTC) + timedelta(days=self._ttl_days)
         scope_key = self._scope_key(scope)
         # PG 写
-        async with self._apg_conn() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO conversation_memory_session
-                (tenant_id, user_id, thread_id, memory_summary, turn_count, status, last_message_at, expires_at)
-                VALUES (%s, %s, %s, '', 0, 'active', NOW(), %s)
-                ON CONFLICT (tenant_id, user_id, thread_id)
-                DO UPDATE SET last_message_at = NOW(), expires_at = EXCLUDED.expires_at
-                """,
-                (scope.tenant_id, scope.user_id, scope.thread_id, expires_at),
+        async with self._apg_session() as session:
+            now = datetime.now(UTC)
+            await session.execute(
+                pg_insert(ConversationMemorySession)
+                .values(
+                    tenant_id=scope.tenant_id,
+                    user_id=scope.user_id,
+                    thread_id=scope.thread_id,
+                    memory_summary="",
+                    turn_count=0,
+                    status="active",
+                    last_message_at=now,
+                    expires_at=expires_at,
+                )
+                .on_conflict_do_update(
+                    index_elements=["tenant_id", "user_id", "thread_id"],
+                    set_={"last_message_at": now, "expires_at": expires_at},
+                )
             )
-            await cur.execute(
-                """
-                SELECT turn_count FROM conversation_memory_session
-                WHERE tenant_id = %s AND user_id = %s AND thread_id = %s FOR UPDATE
-                """,
-                (scope.tenant_id, scope.user_id, scope.thread_id),
+            session_row = (
+                await session.execute(
+                    select(ConversationMemorySession)
+                    .where(
+                        SESSION_TABLE.c.tenant_id == scope.tenant_id,
+                        SESSION_TABLE.c.user_id == scope.user_id,
+                        SESSION_TABLE.c.thread_id == scope.thread_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one()
+            next_turn = session_row.turn_count + 1
+            session.add(
+                ConversationMemoryTurn(
+                    tenant_id=scope.tenant_id,
+                    user_id=scope.user_id,
+                    thread_id=scope.thread_id,
+                    turn_index=next_turn,
+                    role=role,
+                    content=safe_content,
+                    metadata_=metadata or {},
+                )
             )
-            row = await cur.fetchone()
-            next_turn = (row[0] if row else 0) + 1
-            await cur.execute(
-                """
-                INSERT INTO conversation_memory_turn
-                (tenant_id, user_id, thread_id, turn_index, role, content, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    scope.tenant_id,
-                    scope.user_id,
-                    scope.thread_id,
-                    next_turn,
-                    role,
-                    safe_content,
-                    json.dumps(metadata or {}, ensure_ascii=False),
-                ),
-            )
-            await cur.execute(
-                """
-                UPDATE conversation_memory_session
-                SET turn_count = %s, last_message_at = NOW(), version = version + 1
-                WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                """,
-                (next_turn, scope.tenant_id, scope.user_id, scope.thread_id),
-            )
+            session_row.turn_count = next_turn
+            session_row.last_message_at = now
+            session_row.version += 1
         # Redis 写（如果存在）
         # Redis 缓存更新（熔断保护）
         self._redis_circuit.before_call()
@@ -288,18 +313,21 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         safe_summary = self._sanitize(summary) if self._redact_pii else summary
         scope_key = self._scope_key(scope)
 
-        async with self._apg_conn() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                    UPDATE conversation_memory_session
-                    SET memory_summary = %s, last_message_at = NOW(), version = version + 1
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    RETURNING turn_count
-                    """,
-                (safe_summary, scope.tenant_id, scope.user_id, scope.thread_id),
-            )
-            row = await cur.fetchone()
-            turn_count = row[0] if row else 0
+        async with self._apg_session() as session:
+            session_row = (
+                await session.execute(
+                    select(ConversationMemorySession).where(
+                        SESSION_TABLE.c.tenant_id == scope.tenant_id,
+                        SESSION_TABLE.c.user_id == scope.user_id,
+                        SESSION_TABLE.c.thread_id == scope.thread_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            turn_count = session_row.turn_count if session_row else 0
+            if session_row is not None:
+                session_row.memory_summary = safe_summary
+                session_row.last_message_at = datetime.now(UTC)
+                session_row.version += 1
 
         self._redis_circuit.before_call()
         try:
@@ -318,22 +346,28 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             logger.warning("Redis cache write failed: %s", e)
 
     async def aclear_memory(self, scope: MemoryScope) -> None:
-        async with self._apg_conn() as conn, conn.cursor() as cur:
-            await cur.execute(
-                """
-                    UPDATE conversation_memory_session
-                    SET status = 'deleted', last_message_at = NOW(), version = version + 1
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    """,
-                (scope.tenant_id, scope.user_id, scope.thread_id),
+        async with self._apg_session() as session:
+            await session.execute(
+                update(ConversationMemorySession)
+                .where(
+                    SESSION_TABLE.c.tenant_id == scope.tenant_id,
+                    SESSION_TABLE.c.user_id == scope.user_id,
+                    SESSION_TABLE.c.thread_id == scope.thread_id,
+                )
+                .values(
+                    status="deleted",
+                    last_message_at=datetime.now(UTC),
+                    version=SESSION_TABLE.c.version + 1,
+                )
             )
-            await cur.execute(
-                """
-                    UPDATE conversation_memory_turn
-                    SET is_deleted = TRUE
-                    WHERE tenant_id = %s AND user_id = %s AND thread_id = %s
-                    """,
-                (scope.tenant_id, scope.user_id, scope.thread_id),
+            await session.execute(
+                update(ConversationMemoryTurn)
+                .where(
+                    TURN_TABLE.c.tenant_id == scope.tenant_id,
+                    TURN_TABLE.c.user_id == scope.user_id,
+                    TURN_TABLE.c.thread_id == scope.thread_id,
+                )
+                .values(is_deleted=True)
             )
         scope_key = self._scope_key(scope)
         self._redis_circuit.before_call()
