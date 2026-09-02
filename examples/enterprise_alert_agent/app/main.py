@@ -6,6 +6,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -35,6 +36,7 @@ from app.infrastructure.llm.model_client import ModelAuthError, ModelClient, Mod
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
     RedisPostgresConversationMemoryStore,
 )
+from app.infrastructure.queue.redis_stream import RedisStreamWorker
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.observability.alert_manager import alert_manager
 from app.observability.langsmith_tracer import LangSmithTracer
@@ -228,11 +230,39 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def startup_checks() -> None:
+        from redis import asyncio as redis_asyncio
+
         from app.infrastructure.mcp.mcp_client import async_init_mcp
         from app.infrastructure.queue.dlq_handler import dead_letter_queue
 
         await memory.awarmup()  # 异步预热 Redis/PostgreSQL 连接池
         await dead_letter_queue.startup()  # 异步初始化 DLQ，从 Redis 回捞历史数据
+
+        # 初始化 Redis Stream worker
+        async def handle_ingest_task(payload: dict[str, Any]) -> None:
+            """处理文档入库任务"""
+            logger.info("Processing ingest task: %s", payload)
+            # TODO: 调用实际的文档入库逻辑
+            # await ingest_service.process(payload)
+
+        redis_client = redis_asyncio.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            db=settings.redis_db,
+            password=settings.redis_password,
+            decode_responses=True,
+        )
+
+        stream_worker = RedisStreamWorker(
+            redis_client=redis_client,
+            stream_key="tasks:ingest",
+            group_name="ingest-workers",
+            handler=handle_ingest_task,
+        )
+        await stream_worker.startup()
+        app.state.stream_worker = stream_worker
+        logger.info("Redis Stream worker started")
+
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
         app.state.mcp_ready = not settings.mcp_enabled
@@ -308,7 +338,18 @@ def create_app() -> FastAPI:
         from app.infrastructure.mcp.mcp_client import async_close_mcp
 
         await async_close_mcp()
-        await app.state.stream_worker.close()
+
+        # 关闭 Redis Stream worker
+        stream_worker = getattr(app.state, "stream_worker", None)
+        if stream_worker is not None:
+            try:
+                await asyncio.wait_for(
+                    stream_worker.close(),
+                    timeout=settings.graceful_shutdown_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.error("Stream worker did not stop within shutdown timeout")
+
         logger.info("Application shutdown completed")
 
     return app
