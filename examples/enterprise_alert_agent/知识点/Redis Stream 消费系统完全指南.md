@@ -352,27 +352,6 @@ async def handle_ingest_task(payload: dict[str, Any]) -> None:
     )
     result = ingest_service.ingest_text(req)
     logger.info("✅ Ingest completed: %s", result)
-```
-
-### 3. 监控和运维命令
-```bash
-# 查看 Stream 中的消息数
-redis-cli XLEN tasks:ingest
-
-# 查看消费者组信息
-redis-cli XINFO GROUPS tasks:ingest
-
-# 查看待处理消息（未 XACK 的）
-redis-cli XPENDING tasks:ingest ingest-workers
-
-# 查看特定消费者的待处理消息
-redis-cli XPENDING tasks:ingest ingest-workers - + 10
-
-# 手动声明消息给其他消费者（恢复失败消息）
-redis-cli XCLAIM tasks:ingest ingest-workers consumer-2 3600000 msg-id
-```
-
----
 
 ## 📊 状态转换表
 

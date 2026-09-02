@@ -45,6 +45,7 @@ class RedisStreamWorker:
                 raise
         self._worker_task = asyncio.create_task(self._consume())
 
+    """理解文档:Redis Stream 消费系统完全指南.md"""
     async def _consume(self) -> None:
         while not self._stop_event.is_set():
             messages = cast(
@@ -72,8 +73,3 @@ class RedisStreamWorker:
                 task_id=message_id, payload={"fields": fields}, failure_reason=str(e)
             )
             await self._redis.xack(self._stream_key, self._group_name, message_id)
-
-    async def close(self) -> None:
-        self._stop_event.set()
-        if self._worker_task is not None:
-            await self._worker_task

@@ -19,6 +19,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from app.application.services.ingest_service import IngestService
 from app.config.settings import settings
 from app.config.tracing_config import (
     configure_langsmith,
@@ -48,6 +49,7 @@ from app.observability.prometheus_metrics import (
     REQUEST_LATENCY,
 )
 from app.rag.retrieval.retriever import Retriever
+from app.schemas.ingest import IngestTextRequest
 
 
 def get_user_rate_limit_key(request) -> str:
@@ -239,11 +241,23 @@ def create_app() -> FastAPI:
         await dead_letter_queue.startup()  # 异步初始化 DLQ，从 Redis 回捞历史数据
 
         # 初始化 Redis Stream worker
+        # 创建 IngestService 实例（用于处理异步入库任务）
+        ingest_svc = IngestService(chroma_store=chroma_store, trace=trace)
+
         async def handle_ingest_task(payload: dict[str, Any]) -> None:
             """处理文档入库任务"""
-            logger.info("Processing ingest task: %s", payload)
-            # TODO: 调用实际的文档入库逻辑
-            # await ingest_service.process(payload)
+            try:
+                req = IngestTextRequest(
+                    content=payload["content"],
+                    source_id=payload["source_id"],
+                    metadata=payload.get("metadata", {}),
+                )
+                # 调用同步方法（IngestService.ingest_text 是同步的）
+                result = ingest_svc.ingest_text(req)
+                logger.info("✅ Ingest completed: %s", result)
+            except Exception as e:
+                logger.error("❌ Ingest failed: %s", e)
+                raise
 
         redis_client = redis_asyncio.Redis(
             host=settings.redis_host,

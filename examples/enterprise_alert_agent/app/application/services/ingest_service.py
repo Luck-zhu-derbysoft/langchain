@@ -9,7 +9,6 @@ from app.observability.langsmith_tracer import LangSmithTracer
 from app.rag.splitter.text_splitter import TextSplitter
 from app.schemas.ingest import IngestResponse, IngestTextRequest
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -21,7 +20,9 @@ class IngestService:
         self._trace = trace
         self._splitter = TextSplitter(tracer=trace)
 
-    def ingest_text(self, req: IngestTextRequest, *, parent_run: RunTree | None = None) -> IngestResponse:
+    def ingest_text(
+        self, req: IngestTextRequest, *, parent_run: RunTree | None = None
+    ) -> IngestResponse:
         """处理纯文本摄入请求。
 
         流程：
@@ -39,7 +40,8 @@ class IngestService:
         try:
             logger.info(
                 "Ingest start: source_id=%s content_length=%d",
-                req.source_id, len(req.content),
+                req.source_id,
+                len(req.content),
             )
             # 切块
             chunks = self._splitter.split(req.content, parent_run=ingest_run)
@@ -77,7 +79,9 @@ class IngestService:
             )
             logger.info(
                 "Ingest done: source_id=%s chunks=%d total_docs=%d",
-                req.source_id, resp.chunks_count, resp.total_docs,
+                req.source_id,
+                resp.chunks_count,
+                resp.total_docs,
             )
             self._trace.end_run(ingest_run, outputs=resp.model_dump())
             return resp
