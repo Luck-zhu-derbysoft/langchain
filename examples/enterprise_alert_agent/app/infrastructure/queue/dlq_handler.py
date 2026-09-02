@@ -126,7 +126,9 @@ class DeadLetterQueue:
             await self.redis.set(
                 self._entry_keys(entry.dlq_id), json.dumps(entry.to_dict(), ensure_ascii=False)
             )
-            await self.redis.sadd(self._redis_index_key, ttl_seconds, entry.dlq_id)
+            await self.redis.sadd(self._redis_index_key, entry.dlq_id)
+            await self.redis.expire(self._redis_index_key, ttl_seconds)
+            await self.redis.expire(self._entry_keys(entry.dlq_id), ttl_seconds)
         except (ConnectionError, TimeoutError, ValueError, redis_asyncio.RedisError) as e:
             logger.error(f"Failed to persist DLQ entry: {e}")
 

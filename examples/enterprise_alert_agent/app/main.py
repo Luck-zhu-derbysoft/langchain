@@ -236,7 +236,6 @@ def create_app() -> FastAPI:
         app.state.model_ready = False
         app.state.model_check_message = "not checked"
         app.state.mcp_ready = not settings.mcp_enabled
-
         if not settings.dashscope_api_key.strip():
             msg = "DASHSCOPE_API_KEY is empty. /chat requests will fail with 401."
             app.state.model_check_message = msg
@@ -309,6 +308,7 @@ def create_app() -> FastAPI:
         from app.infrastructure.mcp.mcp_client import async_close_mcp
 
         await async_close_mcp()
+        await app.state.stream_worker.close()
         logger.info("Application shutdown completed")
 
     return app
