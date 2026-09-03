@@ -100,6 +100,7 @@ class Settings(BaseSettings):
     memory_redact_pii: bool = True
     memory_ttl_days: int = 7
     redis_cache_ttl_seconds: int = 3600
+    ingest_idempotency_ttl_seconds: int = 600# 幂等键保留时长，需覆盖客户端重试窗口
     memory_summary_update_turn_threshold: int = 5
     cache_recent_turns_limit: int = 10
     # PostgreSQL 配置（替代 MySQL）
@@ -133,7 +134,7 @@ class Settings(BaseSettings):
     circuit_breaker_recovery_seconds: float = 30.0
     alert_webhook_url: str = ""
     alert_webhook_timeout_seconds: float = 5.0
-    
+
 
 
 def _validate_secrets(s: "Settings") -> None:

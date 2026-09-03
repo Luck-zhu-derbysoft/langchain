@@ -6,16 +6,19 @@
 3. /ingest/stats 查看向量库统计
 """
 
+import hashlib
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, UploadFile
 from pypdf import PdfReader
+from redis import asyncio as redis_asyncio
 
 from app.application.services.ingest_service import IngestService
 from app.config.settings import settings
 from app.config.tracing_config import get_langsmith_client, is_langsmith_enabled
+from app.infrastructure.cache.idempotency_guard import IdempotencyGuard
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
 from app.infrastructure.security.auth import TokenPayload, require_auth
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
@@ -64,10 +67,36 @@ def _parse_upload_to_text(file_name: str, content_bytes: bytes) -> str:
     raise HTTPException(status_code=400, detail="不支持的文件类型，仅支持 txt/md/json/csv/log/pdf")
 
 
+def _build_redis_client() -> redis_asyncio.Redis | None:
+    if not settings.redis_host:
+        return None
+    return redis_asyncio.Redis(
+        host=settings.redis_host,
+        port=settings.redis_port,
+        db=settings.redis_db,
+        password=settings.redis_password,
+        decode_responses=True,  # 保证 get() 返回 str，与 _PROCESSING_MARK 字符串比较一致
+    )
+
+
+_idempotency_guard = IdempotencyGuard(
+    redis_client=_build_redis_client(), ttl=settings.ingest_idempotency_ttl_seconds
+)
+
+
+def _idempotency_key(req: IngestTextRequest, idempotency_key: str | None) -> str:
+    if idempotency_key:
+        return f"idemp:ingest:{idempotency_key}"
+    digest = hashlib.sha256(f"{req.source_id}:{req.content}".encode()).hexdigest()
+    return f"idemp:ingest:{req.source_id}:{digest}"
+
+
 @router.post("/text", response_model=IngestResponse)
 @limiter.limit("5/minute")
 async def ingest_text(
-    req: IngestTextRequest, _auth: Annotated[TokenPayload, Depends(require_auth)]
+    req: IngestTextRequest,
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
+    idempotency_key: str | None = Header(None),
 ) -> IngestResponse:
     """接收纯文本并摄入向量库。
 
@@ -88,11 +117,20 @@ async def ingest_text(
         inputs={"source_id": req.source_id, "content_length": len(req.content)},
         tags=["api", "ingest", "text"],
     )
+    idempotency_key_value = _idempotency_key(req, idempotency_key)
+    acquired, cache = await _idempotency_guard.acquire(idempotency_key_value)
+    if not acquired:
+        if cache is None or cache == "Processing":
+            raise HTTPException(status_code=409, detail="重复请求正在处理中，请稍后重试")
+        _trace.end_run(root_run, outputs={"deduplicated": True})
+        return IngestResponse.model_validate_json(cache)
     try:
         resp = _ingest_service.ingest_text(req, parent_run=root_run)
+        await _idempotency_guard.store(idempotency_key_value, resp.model_dump_json())
         _trace.end_run(root_run, outputs=resp.model_dump())
         return resp
     except Exception as exc:
+        await _idempotency_guard.release_on_failure(idempotency_key_value)
         _trace.end_run(root_run, error=LangSmithTracer.format_error(exc))
         raise
 
@@ -123,6 +161,7 @@ async def ingest_file(
     _auth: Annotated[TokenPayload, Depends(require_auth)],
     source_id: str = Form(...),
     category: str = Form("文件导入"),
+    idempotency_key: str | None = Header(None),
 ) -> IngestResponse:
     """接收上传文件并摄入向量库。"""
     root_run = _trace.start_root(
@@ -132,6 +171,7 @@ async def ingest_file(
         tags=["api", "ingest", "file"],
     )
     file_name = file.filename or "uploaded_file"
+    idempotency_key_value = None
     try:
         content_bytes = await file.read(MAX_INGEST_FILE_SIZE + 1)  # 读取文件内容，限制最大字节数
         if not content_bytes:
@@ -143,7 +183,8 @@ async def ingest_file(
         content_str = _parse_upload_to_text(file_name, content_bytes)
         if len(content_str.encode("utf-8")) > MAX_INGEST_TEXT_SIZE:
             raise HTTPException(
-                status_code=413, detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit"
+                status_code=413,
+                detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit",
             )
         resolved_source_id = source_id.strip() or Path(file_name).stem
         ingest_req = IngestTextRequest(
@@ -155,9 +196,21 @@ async def ingest_file(
                 "suffix": Path(file_name).suffix,
             },
         )
+
+        idempotency_key_value = _idempotency_key(ingest_req, idempotency_key)
+        acquired, cache = await _idempotency_guard.acquire(idempotency_key_value)
+        if not acquired:
+            if cache is None or cache == "Processing":
+                raise HTTPException(status_code=409, detail="重复请求正在处理中，请稍后重试")
+            _trace.end_run(root_run, outputs={"deduplicated": True})
+            return IngestResponse.model_validate_json(cache)
+
         resp = _ingest_service.ingest_text(ingest_req, parent_run=root_run)
+        await _idempotency_guard.store(idempotency_key_value, resp.model_dump_json())
         _trace.end_run(root_run, outputs=resp.model_dump())
         return resp
     except Exception as exc:
+        if idempotency_key_value is not None:
+            await _idempotency_guard.release_on_failure(idempotency_key_value)
         _trace.end_run(root_run, error=LangSmithTracer.format_error(exc))
         raise

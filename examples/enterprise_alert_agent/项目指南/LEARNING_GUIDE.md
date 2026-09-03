@@ -20,7 +20,7 @@
 (已修复)| SQLModel ORM | ❌ 裸 psycopg | 建表 + 迁移 | 🔴 |
 | PG/Redis 连接池 / 索引 | ✅ 部分 | 复盘预热逻辑 | 🟡 |
 (已修复)| 消息队列（Stream/Celery/Kafka/RabbitMQ） | ❌ 仅 DLQ 无消费 | DLQ 消费 + Redis Stream | 🔴 |
-| 幂等 / 热点数据 | ❌ 未做 | ingest 幂等键（SETNX） | 🔴 |
+(已修复)| 幂等 / 热点数据 | ❌ 未做 | ingest 幂等键（SETNX） | 🔴 |
 
 ### 3. Agent 核心技能（岗位：优先1 + 加分1/2/3 + 职责①②③）
 | Skills 技能生态（注册/注入） | ⚠️ 技能写死 | `static.py` 改注册表 | 🔴 |
