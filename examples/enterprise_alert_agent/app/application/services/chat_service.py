@@ -42,7 +42,7 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
 )
 from app.infrastructure.queue.dlq_handler import dead_letter_queue
 from app.infrastructure.skill.date.time_skill import TIME_SKILL_MAP
-from app.infrastructure.skill.date.time_skill import TIME_TOOLS_METADATA as time_meta
+from app.infrastructure.skill.registry import skill_registry
 from app.observability.alert_manager import AlertManager
 from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.observability.langsmith_tracer import LangSmithTracer
@@ -696,22 +696,39 @@ class ChatService:
                 reasoning="Intent classification failed",
             ), {"mcp": True, "rag": True}
 
+    # 这点点对应参考文档:Agent&MCP工具注册与调用核心知识点
     async def _aresolve_tools(self, intent: dict[str, Any]) -> ToolsResolution:
         """异步版本：MCP 工具使用异步闭包，避免在异步上下文阻塞事件循环。"""
         from app.infrastructure.mcp.mcp_client import async_get_tool_map
 
-        available_tools: list[dict[str, Any]] = list(time_meta)
+        available_tools: list[dict[str, Any]] = list(skill_registry.metadata())
         mcp_tool_map: dict[str, SkillFunc] = {}
         mcp_tool_metadata: list = []
-        if settings.mcp_enabled:
-            mcp_tool_map = await async_get_tool_map()
-            mcp_tool_metadata = get_tools_metadata()
-            available_tools.extend(mcp_tool_metadata)
-        skill_map = {**TIME_SKILL_MAP, **mcp_tool_map}
+        try:
+            if settings.mcp_enabled:
+                # 异步调用MCP Client，拉取远端MCP服务暴露的工具映射（函数实现）
+                mcp_tool_map = await async_get_tool_map()
+                # 获取MCP工具描述元数据（给LLM看的function‑call schema）
+                mcp_tool_metadata = get_tools_metadata()
+                # 合并：本地工具 + MCP远端工具，全部给到LLM的可用工具列表
+                available_tools.extend(mcp_tool_metadata)
+        except Exception as e:
+            logger.warning("Failed to resolve MCP tools: %s", e)
+            mcp_tool_map = {}
+            mcp_tool_metadata = []
+        local_keys = set(skill_registry.skills_map().keys())
+        mcp_keys = set(mcp_tool_map.keys())
+        conflict_keys = local_keys & mcp_keys
+        if conflict_keys:
+            logger.warning(f"检测到工具名冲突，MCP将覆盖本地工具：{conflict_keys}")
+        # 函数执行映射：本地skill_map 和 MCP工具map合并
+        # key：工具名称；value：可直接await调用的处理函数
+        skill_map = {**skill_registry.skills_map(), **mcp_tool_map}
+
         return ToolsResolution(
-            available=available_tools,
-            skill_map=skill_map,
-            mcp_map=mcp_tool_map,
+            available=available_tools,      # 给LLM：工具schema列表，用于function call
+            skill_map=skill_map,            # 执行层：工具名 → 可执行函数
+            mcp_map=mcp_tool_map,           # 单独保留MCP工具映射，上层可区分本地/远端
         )
 
     def _build_base_system_prompt(

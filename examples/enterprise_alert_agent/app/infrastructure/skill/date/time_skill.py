@@ -4,6 +4,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config.settings import settings
+from app.infrastructure.skill.registry import SkillDescriptor, skill_registry
 
 TIME_TOOLS_METADATA = [
     {
@@ -51,3 +52,12 @@ def get_current_datetime(timezone: str | None = None) -> dict[str, Any]:
 TIME_SKILL_MAP: dict[str, Callable[..., dict[str, Any]]] = {
     "get_current_datetime": get_current_datetime,
 }
+
+skill_registry.register(
+    SkillDescriptor(
+        name="get_current_datetime",
+        func=get_current_datetime,  # 占位函数，实际调用通过 skills_map 获取
+        metadata=TIME_TOOLS_METADATA[0],
+        enabled=settings.time_tool_enabled,
+    )
+)
