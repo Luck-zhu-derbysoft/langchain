@@ -57,11 +57,10 @@ async def async_close_mcp() -> None:
     """Close the shared MCP client and release its session resources."""
     global _mcp_client
     with _init_lock:
-            client = _mcp_client
-            _mcp_client = None
+        client = _mcp_client
+        _mcp_client = None
     if client is not None:
         await client.close()
-
 
 
 def get_tools_metadata() -> list:

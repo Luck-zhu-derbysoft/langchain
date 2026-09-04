@@ -39,14 +39,20 @@ class RemoteMCPClient:
                 headers["Cookie"] = settings.mcp_cookie
             # 发送请求到 MCP 服务，获取工具元信息
             stack = AsyncExitStack()
-            http_client = await stack.enter_async_context(create_mcp_http_client(headers=headers,timeout=httpx.Timeout(settings.mcp_connect_timeout_seconds)))
+            http_client = await stack.enter_async_context(
+                create_mcp_http_client(
+                    headers=headers, timeout=httpx.Timeout(settings.mcp_connect_timeout_seconds)
+                )
+            )
             read, write, _ = await stack.enter_async_context(
                 streamable_http_client(url=settings.mcp_service_url, http_client=http_client)
             )
             session = await stack.enter_async_context(
                 ClientSession(read_stream=read, write_stream=write)
             )
-            await asyncio.wait_for(session.initialize(), timeout=settings.mcp_connect_timeout_seconds)
+            await asyncio.wait_for(
+                session.initialize(), timeout=settings.mcp_connect_timeout_seconds
+            )
 
             tools_results = await session.list_tools()
             self._tools_meta = [
@@ -92,29 +98,30 @@ class RemoteMCPClient:
             }
 
         try:
-                async with self._call_lock:
-                    result = await asyncio.wait_for(self._session.call_tool(name=tool_name, arguments=tool_args), timeout=settings.mcp_call_timeout_seconds)
-                content = result.content
-                if isinstance(content, list) and content:
-                    texts = [
-                        getattr(item, "text", str(item)) for item in content if item is not None
-                    ]
-                    self._circuit_breaker.record_success()
-                    return {
-                        "status": "success",
-                        "data": [{"result": "\n".join(texts)}],
-                        "row_count": len(content),
-                        "error_code": "",
-                        "message": "ok",
-                    }
+            async with self._call_lock:
+                result = await asyncio.wait_for(
+                    self._session.call_tool(name=tool_name, arguments=tool_args),
+                    timeout=settings.mcp_call_timeout_seconds,
+                )
+            content = result.content
+            if isinstance(content, list) and content:
+                texts = [getattr(item, "text", str(item)) for item in content if item is not None]
                 self._circuit_breaker.record_success()
                 return {
                     "status": "success",
-                    "data": [],
-                    "row_count": 0,
+                    "data": [{"result": "\n".join(texts)}],
+                    "row_count": len(content),
                     "error_code": "",
                     "message": "ok",
                 }
+            self._circuit_breaker.record_success()
+            return {
+                "status": "success",
+                "data": [],
+                "row_count": 0,
+                "error_code": "",
+                "message": "ok",
+            }
         except Exception as e:
             # 会话可能已损坏（比如连接被对端关闭），标记为未初始化，下次调用前触发重连
             self._initialized = False

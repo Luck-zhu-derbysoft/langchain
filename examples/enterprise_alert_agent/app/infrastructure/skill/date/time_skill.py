@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,7 +27,7 @@ TIME_TOOLS_METADATA = [
 ]
 
 
-def get_current_datetime(timezone: str | None = None) -> dict[str, Any]:
+async def get_current_datetime(timezone: str | None = None) -> dict[str, Any]:
     tz_name = timezone or settings.app_timezone
     now = datetime.now(ZoneInfo(tz_name))
     weekday_map = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -49,7 +49,7 @@ def get_current_datetime(timezone: str | None = None) -> dict[str, Any]:
     }
 
 
-TIME_SKILL_MAP: dict[str, Callable[..., dict[str, Any]]] = {
+TIME_SKILL_MAP: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
     "get_current_datetime": get_current_datetime,
 }
 

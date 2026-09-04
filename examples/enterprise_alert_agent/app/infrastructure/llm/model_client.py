@@ -134,6 +134,13 @@ class ModelClient:
             except (RuntimeError, AttributeError, TypeError):
                 logger.exception("Failed to close async LLM client")
 
+    async def probe(self) -> None:
+        """Verify that the configured model accepts a minimal completion request."""
+        await self.achat(
+            user_query="Respond with pong.",
+            system_prompt="You are a service health probe. Reply concisely.",
+        )
+
     async def astream_chat(
         self,
         user_query: str,

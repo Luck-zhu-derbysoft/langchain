@@ -15,7 +15,7 @@ class SkillDescriptor:
 
     name: str
     func: SkillFunc
-    metadata: dict[str, str]
+    metadata: dict[str, Any]
     enabled: bool = True
 
 

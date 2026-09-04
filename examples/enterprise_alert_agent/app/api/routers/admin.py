@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config.dynamic_settings import ALLOWED_CONFIG_KEYS, _dynamic_settings
@@ -28,16 +28,21 @@ class TokenRequest(BaseModel):
 
 @router.post("/token")
 @limiter.limit("5/minute")  # 限制每分钟最多请求次数
-async def create_token(request: TokenRequest):
-    if not verify_api_key(request.user_id, request.api_key):
+async def create_token(request: Request, token_request: TokenRequest):
+    if not verify_api_key(token_request.user_id, token_request.api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
-    token = create_access_token(request.user_id, request.role, request.tenant_id)
+    token = create_access_token(
+        token_request.user_id,
+        token_request.role,
+        token_request.tenant_id,
+    )
     return {"token": token}
 
 
 @router.post("/config/{key}")
 @limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def update_config(
+    request: Request,
     key: str,
     value: Any,
     user_id: str = "system",
@@ -79,13 +84,17 @@ async def update_config(
 
 @router.get("/config")
 @limiter.limit("5/minute")  # 限制每分钟最多请求次数
-async def get_all_configs(current_user: TokenPayload = Depends(require_roles(Role.ADMIN))):
+async def get_all_configs(
+    request: Request,
+    current_user: TokenPayload = Depends(require_roles(Role.ADMIN)),
+):
     return _dynamic_settings.get_all_overrides()
 
 
 @router.get("/config/{key}")
 @limiter.limit("30/minute")  # 限制每分钟最多请求次数
 async def get_config(
+    request: Request,
     key: str,
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.OPERATOR, Role.AUDITOR)),
 ):
@@ -99,6 +108,7 @@ async def get_config(
 @router.post("/config/{key}/reset")
 @limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def reset_config(
+    request: Request,
     key: str,
     user_id: str = "system",
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.OPERATOR, Role.AUDITOR)),
@@ -135,6 +145,7 @@ async def reset_config(
 @router.get("/config/history")
 @limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def get_config_change_history(
+    request: Request,
     limit: int = 50,
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.OPERATOR, Role.AUDITOR)),
 ):
@@ -145,28 +156,31 @@ async def get_config_change_history(
 @router.get("/dlq/stats")
 @limiter.limit("30/minute")
 async def get_dlq_stats(
+    request: Request,
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.AUDITOR)),
 ) -> dict[str, Any]:
     """查看 DLQ 各状态计数。"""
-    return dead_letter_queue.stats()
+    return await dead_letter_queue.stats()
 
 
 @router.get("/dlq/pending")
 @limiter.limit("30/minute")
 async def get_dlq_pending(
+    request: Request,
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN, Role.AUDITOR)),
 ) -> dict[str, Any]:
     """列出所有待处理/重试中的 DLQ 条目。"""
-    entries = dead_letter_queue.list_pending()
+    entries = await dead_letter_queue.list_pending()
     return {"count": len(entries), "items": [e.to_dict() for e in entries]}
 
 
 @router.post("/dlq/{dlq_id}/retry")
 @limiter.limit("10/minute")
 async def retry_dlq_entry(
+    request: Request,
     dlq_id: str,
     current_user: TokenPayload = Depends(require_roles(Role.ADMIN)),
 ) -> dict[str, Any]:
     """手动触发单条 DLQ 条目重试。"""
-    result = dead_letter_queue.retry(dlq_id, lambda payload: payload)
+    result = await dead_letter_queue.retry(dlq_id, lambda payload: payload)
     return {"success": result, "dlq_id": dlq_id}

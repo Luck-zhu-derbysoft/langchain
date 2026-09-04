@@ -303,7 +303,7 @@ def create_app() -> FastAPI:
                 service_name="enterprise-alert-agent",
             )
 
-            ModelClient(tracer=startup_tracer).probe()
+            await ModelClient(tracer=startup_tracer).probe()
             app.state.model_ready = True
             app.state.model_check_message = "ok"
         except ModelAuthError:

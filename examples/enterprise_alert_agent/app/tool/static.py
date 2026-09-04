@@ -14,6 +14,7 @@ def _to_bool(value: object, default: bool = True) -> bool:
             return False
     return default
 
+
 def _safe_parse_intent_json(raw: str) -> dict[str, object]:
     text = (raw or "").strip()
     try:
@@ -25,7 +26,7 @@ def _safe_parse_intent_json(raw: str) -> dict[str, object]:
     end = text.rfind("}")
     if start >= 0 and end > start:
         try:
-            obj = json.loads(text[start:end + 1])
+            obj = json.loads(text[start : end + 1])
             return obj if isinstance(obj, dict) else {}
         except Exception:
             return {}

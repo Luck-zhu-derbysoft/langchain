@@ -32,7 +32,7 @@ DB_TOOLS_METADATA = [
 
 
 # 2. 编写具备防御性编程的数据库查询函数
-def query_local_database(sql_query: str) -> dict[str, Any]:
+async def query_local_database(sql_query: str) -> dict[str, Any]:
     """技能执行体：安全地查询本地 SQLite 数据库，由 Agent 通过技能注册表调用。"""
     # 严格的安全机制 1：静态关键字拦截，防止大模型幻觉生成了 DROP/DELETE/UPDATE 等语句
     forbidden_keywords = [

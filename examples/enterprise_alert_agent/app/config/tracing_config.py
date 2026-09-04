@@ -17,6 +17,7 @@ if str(BASE_DIR) not in sys.path:
 _langsmith_client: Client | None = None
 _langsmith_enabled: bool = False
 
+
 class _SettingsLike(Protocol):
     langsmith_tracing: str
     langsmith_api_key: str
@@ -66,6 +67,7 @@ def configure_langsmith() -> None:
 def get_langsmith_client() -> Client | None:
     """获取全局 LangSmith 客户端。"""
     return _langsmith_client
+
 
 def is_langsmith_enabled() -> bool:
     """检查 LangSmith 追踪是否启用。"""

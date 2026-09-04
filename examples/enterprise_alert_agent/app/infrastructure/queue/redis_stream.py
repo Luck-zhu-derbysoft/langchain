@@ -46,6 +46,7 @@ class RedisStreamWorker:
         self._worker_task = asyncio.create_task(self._consume())
 
     """理解文档:Redis Stream 消费系统完全指南.md"""
+
     async def _consume(self) -> None:
         while not self._stop_event.is_set():
             messages = cast(

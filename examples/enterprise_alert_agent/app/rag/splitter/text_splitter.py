@@ -106,6 +106,6 @@ class TextSplitter:
         """为相邻块添加重叠内容。"""
         result = [chunks[0]]
         for i in range(1, len(chunks)):
-            prev_tail = chunks[i - 1][-self._chunk_overlap:]
+            prev_tail = chunks[i - 1][-self._chunk_overlap :]
             result.append(prev_tail + "\n" + chunks[i])
         return result

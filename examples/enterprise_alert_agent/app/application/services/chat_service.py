@@ -725,9 +725,9 @@ class ChatService:
         skill_map = {**skill_registry.skills_map(), **mcp_tool_map}
 
         return ToolsResolution(
-            available=available_tools,      # 给LLM：工具schema列表，用于function call
-            skill_map=skill_map,            # 执行层：工具名 → 可执行函数
-            mcp_map=mcp_tool_map,           # 单独保留MCP工具映射，上层可区分本地/远端
+            available=available_tools,  # 给LLM：工具schema列表，用于function call
+            skill_map=skill_map,  # 执行层：工具名 → 可执行函数
+            mcp_map=mcp_tool_map,  # 单独保留MCP工具映射，上层可区分本地/远端
         )
 
     def _build_base_system_prompt(

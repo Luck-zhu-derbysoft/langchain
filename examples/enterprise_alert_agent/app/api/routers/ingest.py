@@ -11,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Request, UploadFile
 from pypdf import PdfReader
 from redis import asyncio as redis_asyncio
 
@@ -94,6 +94,7 @@ def _idempotency_key(req: IngestTextRequest, idempotency_key: str | None) -> str
 @router.post("/text", response_model=IngestResponse)
 @limiter.limit("5/minute")
 async def ingest_text(
+    request: Request,
     req: IngestTextRequest,
     _auth: Annotated[TokenPayload, Depends(require_auth)],
     idempotency_key: str | None = Header(None),
@@ -137,7 +138,10 @@ async def ingest_text(
 
 @router.get("/stats")
 @limiter.limit("10/minute")
-def ingest_stats(_auth: Annotated[TokenPayload, Depends(require_auth)]) -> dict[str, int]:
+def ingest_stats(
+    request: Request,
+    _auth: Annotated[TokenPayload, Depends(require_auth)],
+) -> dict[str, int]:
     """查看当前向量库中的文档总数。"""
     root_run = _trace.start_root(
         name="api.ingest_stats",
@@ -157,6 +161,7 @@ def ingest_stats(_auth: Annotated[TokenPayload, Depends(require_auth)]) -> dict[
 @router.post("/file")
 @limiter.limit("5/minute")
 async def ingest_file(
+    request: Request,
     file: UploadFile,
     _auth: Annotated[TokenPayload, Depends(require_auth)],
     source_id: str = Form(...),

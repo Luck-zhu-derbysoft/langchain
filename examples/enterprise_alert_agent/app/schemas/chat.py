@@ -1,24 +1,23 @@
-
 from pydantic import BaseModel, Field
 
 
 class Citation(BaseModel):
-	source_id: str = Field(..., description="知识来源标识")
-	snippet: str = Field(..., description="引用片段")
+    source_id: str = Field(..., description="知识来源标识")
+    snippet: str = Field(..., description="引用片段")
 
 
 class ChatRequest(BaseModel):
-	query: str = Field(..., min_length=1, description="用户问题")
-	business_context: str = Field(default="", description="业务上下文")
-	thread_id: str = Field(default="default-thread", description="会话线程ID，用于记忆复用")
-	tenant_id: str = Field(default="", description="租户ID，由服务端从 JWT 强制注入")
-	user_id: str = Field(default="", description="用户ID，由服务端从 JWT 强制注入")
+    query: str = Field(..., min_length=1, description="用户问题")
+    business_context: str = Field(default="", description="业务上下文")
+    thread_id: str = Field(default="default-thread", description="会话线程ID，用于记忆复用")
+    tenant_id: str = Field(default="", description="租户ID，由服务端从 JWT 强制注入")
+    user_id: str = Field(default="", description="用户ID，由服务端从 JWT 强制注入")
 
 
 class ClearRequest(BaseModel):
-	thread_id: str = Field(..., description="会话线程ID，用于记忆复用")
-	tenant_id: str = Field(..., description="租户ID，用于多租户场景")
-	user_id: str = Field(..., description="用户ID，用于个性化和权限控制")
+    thread_id: str = Field(..., description="会话线程ID，用于记忆复用")
+    tenant_id: str = Field(..., description="租户ID，用于多租户场景")
+    user_id: str = Field(..., description="用户ID，用于个性化和权限控制")
 
 
 class ChatResponse(BaseModel):
@@ -31,7 +30,7 @@ class ChatResponse(BaseModel):
     trace_id: str | None = Field(default=None, description="追踪ID，用于链路追踪和调试")
     selected_tool: str | None = Field(default=None, description="选择的工具名称")
     tool_confidence: float | None = Field(default=None, description="选择工具的置信度")
-    fallback_tool:list[str] = Field(default=[], description="备选工具列表")
+    fallback_tool: list[str] = Field(default=[], description="备选工具列表")
     tool_selection_reason: str | None = Field(default=None, description="选择工具的原因")
     task_decomposed: bool = Field(default=False, description="是否进行了任务拆分")
     is_multi_task: bool = Field(default=False, description="是否进入多任务执行模式")
@@ -55,6 +54,3 @@ class ChatResponse(BaseModel):
     #   "cache_hit_rate": 0.45,
     #   "success_rate": 0.98,
     # }
-
-
-

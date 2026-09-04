@@ -20,7 +20,7 @@ from app.observability.langsmith_tracer import LangSmithTracer  # type: ignore[i
 class ChromaStore:
     """基于 ChromaDB 的持久化向量存储。"""
 
-    def __init__(self, embedding_client: EmbeddingClient,tracer:LangSmithTracer) -> None:
+    def __init__(self, embedding_client: EmbeddingClient, tracer: LangSmithTracer) -> None:
         self._embedding_client = embedding_client
         self._tracer = tracer
 
@@ -35,7 +35,8 @@ class ChromaStore:
             name=settings.chroma_collection_name,
             metadata={"hnsw:space": "cosine"},  # 使用余弦相似度
         )
-        #新增parent_run 参数和追踪逻辑
+        # 新增parent_run 参数和追踪逻辑
+
     def add_documents(
         self,
         texts: list[str],
@@ -44,7 +45,7 @@ class ChromaStore:
         *,
         parent_run: RunTree | None = None,
     ) -> list[str]:
-        #创建 vectorstore.add_documents 子 run
+        # 创建 vectorstore.add_documents 子 run
         run = self._tracer.start_child(
             parent_run=parent_run,
             name="vectorstore.add_documents",
@@ -58,7 +59,7 @@ class ChromaStore:
                 return []
 
                 # 生成 embedding 向量
-            embeddings = self._embedding_client.embed_texts(texts,parent_run=run)
+            embeddings = self._embedding_client.embed_texts(texts, parent_run=run)
 
             if ids is None:
                 ids = [str(uuid.uuid4()) for _ in texts]
@@ -76,51 +77,54 @@ class ChromaStore:
             self._tracer.end_run(run, error=LangSmithTracer.format_error(e))
             raise
 
-    def query(self,
-              query_text: str,
-              top_k: int = 3,
-              *,
-              where: dict[str, Any] | None = None,
-              parent_run: RunTree | None = None
-              ) -> list[dict[str, str]]:
-                #创建 vectorstore.query 子 run
-                run = self._tracer.start_child(
-                    parent_run=parent_run,
-                    name="vectorstore.query",
-                    run_type="retriever",
-                    inputs={"query_text": query_text, "top_k": top_k},
-                    tags=["vectorstore", "chroma", "query"],
-                )
-                try:
-                    # 新增：调用 embedding 时透传 parent_run
-                    query_embedding = self._embedding_client.embed_query(query_text, parent_run=run)
-                    results = self._collection.query(
-                        query_embeddings=[query_embedding],  # type: ignore[arg-type]
-                        n_results=top_k,
-                        include=["documents", "metadatas", "distances"],
-                    )
+    def query(
+        self,
+        query_text: str,
+        top_k: int = 3,
+        *,
+        where: dict[str, Any] | None = None,
+        parent_run: RunTree | None = None,
+    ) -> list[dict[str, str]]:
+        # 创建 vectorstore.query 子 run
+        run = self._tracer.start_child(
+            parent_run=parent_run,
+            name="vectorstore.query",
+            run_type="retriever",
+            inputs={"query_text": query_text, "top_k": top_k},
+            tags=["vectorstore", "chroma", "query"],
+        )
+        try:
+            # 新增：调用 embedding 时透传 parent_run
+            query_embedding = self._embedding_client.embed_query(query_text, parent_run=run)
+            results = self._collection.query(
+                query_embeddings=[query_embedding],  # type: ignore[arg-type]
+                n_results=top_k,
+                include=["documents", "metadatas", "distances"],
+            )
 
-                    docs: list[dict[str, Any]] = []
-                    if results["documents"] and results["metadatas"] and results["distances"]:
-                        for doc, meta, distance in zip(
-                            results["documents"][0],
-                            results["metadatas"][0],
-                            results["distances"][0],
-                        ):
-                            dense_score = float(1 - float(distance))
-                            source_id = str(meta.get("source_id", "unknown")) if meta else "unknown"
-                            docs.append({
-                                "source_id": source_id,
-                                "content": doc or "",
-                                "metadata": meta or {},
-                                "score": f"{dense_score:.4f}",
-                            })
-                    self._tracer.end_run(run, outputs={"hits": len(docs)})
-                    return docs
-                except Exception as e:
-                    # 新增：异常路径记录
-                    self._tracer.end_run(run, error=LangSmithTracer.format_error(e))
-                    raise
+            docs: list[dict[str, Any]] = []
+            if results["documents"] and results["metadatas"] and results["distances"]:
+                for doc, meta, distance in zip(
+                    results["documents"][0],
+                    results["metadatas"][0],
+                    results["distances"][0],
+                ):
+                    dense_score = float(1 - float(distance))
+                    source_id = str(meta.get("source_id", "unknown")) if meta else "unknown"
+                    docs.append(
+                        {
+                            "source_id": source_id,
+                            "content": doc or "",
+                            "metadata": meta or {},
+                            "score": f"{dense_score:.4f}",
+                        }
+                    )
+            self._tracer.end_run(run, outputs={"hits": len(docs)})
+            return docs
+        except Exception as e:
+            # 新增：异常路径记录
+            self._tracer.end_run(run, error=LangSmithTracer.format_error(e))
+            raise
 
     def count(self) -> int:
         """返回当前 collection 中的文档总数。"""

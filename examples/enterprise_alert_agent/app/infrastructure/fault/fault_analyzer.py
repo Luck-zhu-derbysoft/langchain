@@ -1,4 +1,5 @@
 """故障分析和诊断引擎"""
+
 import logging
 
 from app.infrastructure.fault.fault_types import (
@@ -9,6 +10,7 @@ from app.infrastructure.fault.fault_types import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 class FaultAnalyzer:
     """故障分析器 - 根据错误信息生成诊断和恢复建议"""
@@ -46,12 +48,15 @@ class FaultAnalyzer:
                 "tool_name": context.tool_name,
                 "retry_count": context.retry_count,
                 "elapsed_time_ms": context.elapsed_time_ms,
-            }
+            },
         )
 
         logger.warning(
             "[%s] Fault diagnosed: type=%s, severity=%s, root_cause=%s",
-            context.request_id, fault_type.value, severity.value, root_cause[:50]
+            context.request_id,
+            fault_type.value,
+            severity.value,
+            root_cause[:50],
         )
 
         return diagnosis
@@ -190,11 +195,11 @@ class FaultAnalyzer:
     def _estimate_recovery_time(fault_type: FaultType) -> float:
         """估算恢复时间（秒）"""
         recovery_times = {
-            FaultType.TOOL_TIMEOUT: 30.0,           # 超时通常需要等待
-            FaultType.RATE_LIMIT: 60.0,             # 限流需要等待更长
-            FaultType.AGENT_CIRCUIT_OPEN: 30.0,     # 熔断自动恢复时间
-            FaultType.NETWORK_ERROR: 10.0,          # 网络错误可能快速恢复
-            FaultType.TOOL_EXECUTION_ERROR: 5.0,    # 执行错误可快速重试
+            FaultType.TOOL_TIMEOUT: 30.0,  # 超时通常需要等待
+            FaultType.RATE_LIMIT: 60.0,  # 限流需要等待更长
+            FaultType.AGENT_CIRCUIT_OPEN: 30.0,  # 熔断自动恢复时间
+            FaultType.NETWORK_ERROR: 10.0,  # 网络错误可能快速恢复
+            FaultType.TOOL_EXECUTION_ERROR: 5.0,  # 执行错误可快速重试
         }
         return recovery_times.get(fault_type, 5.0)
 

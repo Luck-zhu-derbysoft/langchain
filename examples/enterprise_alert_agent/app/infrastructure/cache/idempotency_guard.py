@@ -9,7 +9,8 @@ _PROCESSING_MARK = "PROCESSING"
 
 class IdempotencyGuard:
     """幂等守卫。"""
-    def __init__(self, redis_client: redis_asyncio.Redis|None, ttl=600):
+
+    def __init__(self, redis_client: redis_asyncio.Redis | None, ttl=600):
         self._redis_client = redis_client
         self.ttl = ttl
 
@@ -29,8 +30,10 @@ class IdempotencyGuard:
         return False, cached_value
 
     async def release_on_failure(self, key):
-        await self._redis_client.delete(key)
+        if self._redis_client is not None:
+            await self._redis_client.delete(key)
 
     async def store(self, key, result_json: str):
         """存储幂等值。"""
-        await self._redis_client.set(key, result_json)
+        if self._redis_client is not None:
+            await self._redis_client.set(key, result_json)
