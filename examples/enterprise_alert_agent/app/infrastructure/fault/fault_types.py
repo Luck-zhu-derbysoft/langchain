@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
+
 class FaultType(str, Enum):
     """故障类型"""
     TOOL_NOT_FOUND = "tool_not_found"           # 工具不存在

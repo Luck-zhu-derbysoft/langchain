@@ -1,8 +1,12 @@
 """故障分析和诊断引擎"""
 import logging
 
-from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis, FaultSeverity, FaultType
-
+from app.infrastructure.fault.fault_types import (
+    FaultContext,
+    FaultDiagnosis,
+    FaultSeverity,
+    FaultType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +126,7 @@ class FaultAnalyzer:
             suggestions = [
                 f"检查工具 '{context.tool_name}' 是否已正确注册",
                 "查看 settings.py 中的工具配置",
-                f"尝试使用备选工具（如果可用）",
+                "尝试使用备选工具（如果可用）",
             ]
         elif fault_type == FaultType.TOOL_TIMEOUT:
             suggestions = [
@@ -150,13 +154,13 @@ class FaultAnalyzer:
             ]
         elif fault_type == FaultType.AGENT_CIRCUIT_OPEN:
             suggestions = [
-                f"等待熔断恢复（30秒后自动尝试）",
+                "等待熔断恢复（30秒后自动尝试）",
                 f"检查智能体 '{context.agent_id}' 的日志",
                 "考虑手动重置熔断状态",
             ]
         else:
             suggestions = [
-                f"重试操作（最多 3 次）",
+                "重试操作（最多 3 次）",
                 "查看详细错误日志",
                 "如问题持续，请联系技术支持",
             ]

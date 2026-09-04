@@ -10,12 +10,11 @@ from typing import Any
 
 import chromadb  # type: ignore[import-untyped]
 from chromadb.config import Settings as ChromaSettings  # type: ignore[import-untyped]
+from langsmith.run_trees import RunTree
 
 from app.config.settings import settings
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
-from langsmith.run_trees import RunTree
 from app.observability.langsmith_tracer import LangSmithTracer  # type: ignore[import-untyped]
-
 
 
 class ChromaStore:

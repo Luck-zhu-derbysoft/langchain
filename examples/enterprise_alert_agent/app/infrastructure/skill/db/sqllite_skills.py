@@ -4,6 +4,7 @@ import sqlite3
 from typing import Any
 
 from app.config.settings import settings
+from app.infrastructure.skill.registry import SkillDescriptor, skill_registry
 
 # 1. 声明给大模型的 Tool 元数据（JSON Schema）
 DB_TOOLS_METADATA = [
@@ -94,7 +95,6 @@ def query_local_database(sql_query: str) -> dict[str, Any]:
 # 技能路由字典映射
 DB_SKILL_MAP = {"query_local_database": query_local_database}
 
-from app.infrastructure.skill.registry import SkillDescriptor, skill_registry
 
 skill_registry.register(
     SkillDescriptor(
