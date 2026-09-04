@@ -93,6 +93,12 @@ repos:
         entry: make -C libs/partners/nomic format lint
         files: ^libs/partners/nomic/
         pass_filenames: false
+      - id: enterprise-alert-agent
+        name: lint, type check, and test enterprise alert agent
+        language: system
+        entry: powershell -ExecutionPolicy Bypass -File examples/enterprise_alert_agent/scripts/pre_commit_checks.ps1
+        files: ^examples/enterprise_alert_agent/
+        pass_filenames: false
       - id: ollama
         name: format and lint partners/ollama
         language: system
