@@ -113,6 +113,8 @@ class Settings(BaseSettings):
     # --- MCP 配置 ---
     mcp_service_url: str = ""
     mcp_enabled: bool = True
+    mcp_connect_timeout_seconds: float = 10.0  # 建立会话/握手超时
+    mcp_call_timeout_seconds: float = 15.0  # 单次工具调用超时
     mcp_api_key: str = ""
     mcp_cookie: str = ""
     # ========== 故障诊断配置==========

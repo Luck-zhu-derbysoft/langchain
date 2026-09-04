@@ -82,6 +82,8 @@ async def async_get_tool_map() -> dict[str, Callable[..., Any]]:
     """Build asynchronous MCP tool functions for async callers."""
     if _mcp_client is None:
         return {}
+    if not _mcp_client._initialized:
+        await _mcp_client.initialize()
     return {
         tool["function"]["name"]: _make_async_remote_tool_func(
             _mcp_client, tool["function"]["name"]
