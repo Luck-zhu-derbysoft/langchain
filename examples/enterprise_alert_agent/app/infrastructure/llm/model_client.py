@@ -1,10 +1,9 @@
 import asyncio
-import time
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from langsmith.run_trees import RunTree, logger
-from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError, OpenAI
+from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError
 
 from app.config.settings import settings
 from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
@@ -13,157 +12,24 @@ from app.observability.langsmith_tracer import LangSmithTracer
 
 class ModelClient:
     def __init__(self, tracer: LangSmithTracer) -> None:
-        self._client = OpenAI(
-            api_key=settings.dashscope_api_key,
-            base_url=settings.base_url,
-            timeout=settings.request_timeout_seconds,
-        )
-        self._async_client = AsyncOpenAI(
-            api_key=settings.dashscope_api_key,
-            base_url=settings.base_url,
-            timeout=settings.request_timeout_seconds,
-        )
+        self._async_client_map = {
+            "dashscope": AsyncOpenAI(
+                api_key=settings.dashscope_api_key,
+                base_url=settings.dashscope_base_url,
+                timeout=settings.request_timeout_seconds,
+            ),
+            "openai": AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                timeout=settings.request_timeout_seconds,
+            ),
+        }
         self._tracer = tracer
         self._circuit_breaker = CircuitBreaker(
             name="llm",
             failure_threshold=settings.circuit_breaker_failure_threshold,
             recovery_seconds=settings.circuit_breaker_recovery_seconds,
         )
-
-    def _classify_error(self, error: Exception) -> bool:
-        """判断错误是否可重试"""
-        transient_errors = (
-            APIConnectionError,
-            TimeoutError,
-            ConnectionResetError,
-        )
-        non_retryable = (
-            AuthenticationError,
-            ValueError,  # 请求格式错误
-        )
-        if isinstance(error, non_retryable):
-            return False
-        return isinstance(error, transient_errors)
-
-    def chat(
-        self,
-        user_query: str,
-        system_prompt: str,
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        return_message: bool = False,
-        parent_run: RunTree | None = None,
-        _token_counter: list[int] | None = None,
-    ) -> Any:
-        llm_run = self._tracer.start_child(
-            parent_run=parent_run,
-            name="llm.chat_completion",
-            run_type="llm",
-            inputs={
-                "user_query": user_query,
-                "system_prompt_length": len(system_prompt),
-                "model": settings.model_name,
-                "tools_count": len(tools) if tools else 0,
-            },
-            tags=["llm", settings.model_name],
-        )
-        try:
-            payload: dict[str, Any] = {
-                "model": settings.model_name,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query},
-                ],
-                "temperature": 0.1,
-            }
-            if tools:
-                payload["tools"] = tools
-            completion = None
-            models = [settings.model_name, settings.fallback_model_name]
-            for index, model_candidate in enumerate(models):
-                payload["model"] = model_candidate
-
-                for attempt in range(settings.model_max_retries + 1):
-                    try:
-                        completion = self._circuit_breaker.call(
-                            lambda: self._client.chat.completions.create(**payload)
-                        )
-                        break  # 成功则跳出重试循环
-                    except AuthenticationError:
-                        raise  # 鉴权错误不重试，直接向上抛
-                    except Exception as exc:
-                        if not self._classify_error(exc):
-                            raise  # 非重试错误，直接向上抛
-                        if attempt < settings.model_max_retries:
-                            logger.warning(
-                                "LLM request failed, retrying... (attempt %d/%d) error: %s",
-                                attempt + 1,
-                                settings.model_max_retries,
-                                exc,
-                            )
-                            time.sleep(
-                                min(
-                                    settings.model_retry_backoff_seconds * (2**attempt),
-                                    8.0,
-                                )
-                            )
-                        else:
-                            logger.error(
-                                "LLM request failed after %d attempts. error: %s",
-                                settings.model_max_retries,
-                                exc,
-                            )
-                            break  # 当前模型重试结束，跳出重试循环尝试下一个模型候选
-                if completion is not None:
-                    break  # 当前模型重试后仍失败，尝试下一个模型候选
-            if completion is None:
-                raise ModelRequestError("Model request failed after retries and fallback attempts.")
-            message = completion.choices[0].message
-            content = message.content or ""
-
-            outputs: dict[str, Any] = {
-                "answer_length": len(content),
-                "model": payload["model"],
-                "answer_preview": content[:1000],
-            }
-            if getattr(message, "tool_calls", None):
-                outputs["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "name": tc.function.name if tc.function else "",
-                        "arguments": tc.function.arguments if tc.function else "",
-                    }
-                    for tc in message.tool_calls
-                ]
-
-            usage = getattr(completion, "usage", None)
-            if usage is not None and hasattr(usage, "model_dump"):
-                outputs["usage"] = usage.model_dump()
-            if usage is not None and _token_counter is not None:
-                _token_counter[0] += (
-                    usage.total_tokens if isinstance(usage.total_tokens, int) else 0
-                )
-                if _token_counter[0] >= settings.max_tokens_per_request:
-                    self._tracer.end_run(llm_run, outputs=outputs)
-                    raise BudgetExceededError("Model request exceeds the maximum token limit.")
-                outputs["total_tokens"] = usage.total_tokens
-            self._tracer.end_run(llm_run, outputs=outputs)
-            if return_message:
-                return message
-            return content or ""
-
-        except CircuitOpenError as exc:
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise ModelRequestError("LLM circuit is open") from exc
-        except AuthenticationError as exc:
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise ModelAuthError("Model authentication failed") from exc
-        except (APIConnectionError, APIError) as exc:
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise ModelRequestError("Model request failed") from exc
-        except BudgetExceededError as exc:
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise
 
     async def achat(
         self,
@@ -175,6 +41,8 @@ class ModelClient:
         parent_run: RunTree | None = None,
         _token_counter: list[int] | None = None,
     ) -> Any:
+        candidates = self._route_request()
+        selected_model = candidates[0][1]
         """Asynchronously call the configured model with retry and fallback."""
         llm_run = self._tracer.start_child(
             parent_run=parent_run,
@@ -183,29 +51,34 @@ class ModelClient:
             inputs={
                 "user_query": user_query,
                 "system_prompt_length": len(system_prompt),
-                "model": settings.model_name,
+                "model": selected_model,
                 "tools_count": len(tools) if tools else 0,
             },
-            tags=["llm", settings.model_name, "async"],
+            tags=["llm", selected_model, "async"],
         )
-        payload: dict[str, Any] = {
-            "model": settings.model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query},
-            ],
-            "temperature": 0.1,
-        }
-        if tools:
-            payload["tools"] = tools
         try:
             completion = None
-            for model_candidate in (settings.model_name, settings.fallback_model_name):
-                payload["model"] = model_candidate
+            for provider, model_name in candidates:
+                _async_client = self._async_client_map.get(provider)
+                if _async_client is None:
+                    logger.warning("LLM client for provider '%s' not found, skipping.", provider)
+                    continue
+
+                payload: dict[str, Any] = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_query},
+                    ],
+                    "temperature": 0.1,
+                }
+                if tools:
+                    payload["tools"] = tools
+
                 for attempt in range(settings.model_max_retries + 1):
                     try:
                         self._circuit_breaker.before_call()
-                        completion = await self._async_client.chat.completions.create(**payload)
+                        completion = await _async_client.chat.completions.create(**payload)
                         self._circuit_breaker.record_success()
                         break
                     except AuthenticationError:
@@ -235,7 +108,7 @@ class ModelClient:
                     raise BudgetExceededError("Model request exceeds the maximum token limit.")
             outputs = {
                 "answer_length": len(message.content or ""),
-                "model": payload["model"],
+                "model": completion.model or selected_model,
                 "total_tokens": getattr(usage, "total_tokens", 0) if usage else 0,
             }
             self._tracer.end_run(llm_run, outputs=outputs)
@@ -254,8 +127,12 @@ class ModelClient:
             raise
 
     async def aclose(self) -> None:
-        """Close the asynchronous provider client."""
-        await self._async_client.close()
+        """Close all asynchronous provider clients."""
+        for async_client in self._async_client_map.values():
+            try:
+                await async_client.close()
+            except (RuntimeError, AttributeError, TypeError):
+                logger.exception("Failed to close async LLM client")
 
     async def astream_chat(
         self,
@@ -266,159 +143,135 @@ class ModelClient:
         parent_run: RunTree | None = None,
     ) -> AsyncGenerator[str, None]:
         """Asynchronously stream model output without blocking the event loop."""
+        candidates = self._route_request()
+        selected_model = candidates[0][1]
         llm_run = self._tracer.start_child(
             parent_run=parent_run,
             name="llm.chat_completion.astream",
             run_type="llm",
-            inputs={"user_query": user_query, "stream": True},
-            tags=["llm", settings.model_name, "async", "stream"],
+            inputs={"user_query": user_query, "stream": True, "model": selected_model},
+            tags=["llm", selected_model, "async", "stream"],
         )
-        payload: dict[str, Any] = {
-            "model": settings.model_name,
-            "stream": True,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query},
-            ],
-            "temperature": 0.1,
-        }
-        if tools:
-            payload["tools"] = tools
-        try:
-            self._circuit_breaker.before_call()
-            stream = await self._async_client.chat.completions.create(**payload)
-            self._circuit_breaker.record_success()
-            answer_parts: list[str] = []
-            async for chunk in stream:
-                if not chunk.choices or not chunk.choices[0].delta:
-                    continue
-                piece = getattr(chunk.choices[0].delta, "content", "")
-                if piece:
-                    answer_parts.append(piece)
-                    yield piece
-            self._tracer.end_run(
-                llm_run,
-                outputs={"answer_length": len("".join(answer_parts)), "stream": True},
-            )
-        except CircuitOpenError as exc:
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise ModelRequestError("LLM circuit is open") from exc
-        except AuthenticationError as exc:
-            self._circuit_breaker.record_failure()
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise ModelAuthError("Model authentication failed") from exc
-        except (APIConnectionError, APIError) as exc:
-            self._circuit_breaker.record_failure()
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise ModelRequestError("Model request failed") from exc
-        except Exception as exc:
-            self._circuit_breaker.record_failure()
-            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise
 
-    def stream_chat(
-        self,
-        user_query: str,
-        system_prompt: str,
-        *,
-        tools: list[dict[str, Any]] | None = None,
-        parent_run: RunTree | None = None,
-    ) -> Generator[str, None, None]:
-
-        # 追踪整个流式聊天请求的生命周期
-        llm_run = self._tracer.start_child(
-            name="llm.chat_completion.stream",
-            run_type="llm",
-            inputs={
-                "user_query": user_query,
-                "system_prompt_length": len(system_prompt),
-                "model": settings.model_name,
-                "tools_count": len(tools) if tools else 0,
-                "stream": True,
-            },
-            tags=["llm", settings.model_name, "stream"],
-            parent_run=parent_run,
-        )
         try:
-            payload: dict[str, Any] = {
-                "model": settings.model_name,
-                "stream": True,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": user_query,
-                    },
-                ],
-                "temperature": 0.1,
-            }
-            if tools:
-                payload["tools"] = tools
-            stream = self._circuit_breaker.call(
-                lambda: self._client.chat.completions.create(**payload)
-            )
-            answer_parts: list[str] = []
-            for chunk in stream:
-                if not chunk.choices or not chunk.choices[0].delta:
+            for provider, model_name in candidates:
+                _async_client = self._async_client_map.get(provider)
+                if not _async_client:
+                    logger.warning("No async client found for provider: %s", provider)
                     continue
-                delta = chunk.choices[0].delta
-                piece = getattr(delta, "content", "")
-                if piece:
-                    answer_parts.append(piece)
-                    yield piece
-            answer = "".join(answer_parts)
-            self._tracer.end_run(
-                llm_run,
-                outputs={
-                    "answer": answer,
-                    "answer_length": len(answer),
-                    "answer_preview": answer[:1000],
-                    "model": settings.model_name,
+
+                payload: dict[str, Any] = {
+                    "model": model_name,
                     "stream": True,
-                },
-            )
-        except CircuitOpenError as exc:
-            self._tracer.end_run(
-                llm_run,
-                error=LangSmithTracer.format_error(exc),
-            )
-            raise ModelRequestError("LLM circuit is open") from exc
-        except AuthenticationError as exc:
-            self._tracer.end_run(
-                llm_run,
-                error=LangSmithTracer.format_error(exc),
-            )
-            raise ModelAuthError("Model authentication failed") from exc
-        except Exception as exc:
-            self._tracer.end_run(
-                llm_run,
-                error=LangSmithTracer.format_error(exc),
-            )
-            raise
-
-    def probe(self) -> None:
-        """Run a lightweight provider check during service startup."""
-        try:
-            self._circuit_breaker.call(
-                lambda: self._client.chat.completions.create(
-                    model=settings.model_name,
-                    messages=[
-                        {"role": "system", "content": "health-check"},
-                        {"role": "user", "content": "ping"},
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_query},
                     ],
-                    temperature=0,
-                    max_tokens=1,
-                )
-            )
+                    "temperature": 0.1,
+                }
+                if tools:
+                    payload["tools"] = tools
+
+                try:
+                    self._circuit_breaker.before_call()
+                    stream = await _async_client.chat.completions.create(**payload)
+                    self._circuit_breaker.record_success()
+                    answer_parts: list[str] = []
+                    async for chunk in stream:
+                        if not chunk.choices or not chunk.choices[0].delta:
+                            continue
+                        piece = getattr(chunk.choices[0].delta, "content", "")
+                        if piece:
+                            answer_parts.append(piece)
+                            yield piece
+                    self._tracer.end_run(
+                        llm_run,
+                        outputs={"answer_length": len("".join(answer_parts)), "stream": True},
+                    )
+                    return
+                except CircuitOpenError as exc:
+                    self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+                    raise ModelRequestError("LLM circuit is open") from exc
+                except AuthenticationError as exc:
+                    self._circuit_breaker.record_failure()
+                    self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+                    raise ModelAuthError("Model authentication failed") from exc
+                except (APIConnectionError, APIError) as exc:
+                    self._circuit_breaker.record_failure()
+                    logger.warning(
+                        "Async stream failed for provider=%s model=%s, trying fallback: %s",
+                        provider,
+                        model_name,
+                        exc,
+                    )
+                    continue
+                except Exception as exc:
+                    self._circuit_breaker.record_failure()
+                    self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+                    raise
+
+            raise ModelRequestError("Model request failed after retries and fallback attempts.")
         except CircuitOpenError as exc:
+            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
             raise ModelRequestError("LLM circuit is open") from exc
-        except AuthenticationError as exc:
-            raise ModelAuthError("Model authentication failed") from exc
-        except (APIConnectionError, APIError) as exc:
-            raise ModelRequestError("Model request failed") from exc
+
+    def _classify_error(self, error: Exception) -> bool:
+        """判断错误是否可重试"""
+        transient_errors = (
+            APIConnectionError,
+            TimeoutError,
+            ConnectionResetError,
+        )
+        non_retryable = (
+            AuthenticationError,
+            ValueError,
+        )
+        if isinstance(error, non_retryable):
+            return False
+        return isinstance(error, transient_errors)
+
+    def _route_request(self) -> list[tuple[str, str]]:
+        """Return ordered provider/model candidates for routing and fallback."""
+        provider = settings.llm_provider.lower()
+
+        if provider == "openai":
+            return [("openai", settings.openai_model)]
+
+        if provider == "dashscope":
+            return [
+                ("dashscope", settings.default_model),
+                ("dashscope", settings.fallback_model),
+            ]
+
+        return [
+            ("dashscope", settings.default_model),
+            ("dashscope", settings.fallback_model),
+        ]
+
+    # def probe(self) -> None:
+    #     """Run a lightweight provider check during service startup."""
+    #     provider, model_name = self._route_request()
+    #     client = self._client_map.get(provider)
+    #     if not client:
+    #         raise ModelRequestError(f"No client found for provider: {provider}")
+    #     try:
+    #         self._circuit_breaker.call(
+    #             lambda: client.chat.completions.create(
+    #                 model=model_name,
+    #                 messages=[
+    #                     {"role": "system", "content": "health-check"},
+    #                     {"role": "user", "content": "ping"},
+    #                 ],
+    #                 temperature=0,
+    #                 max_tokens=1,
+    #             )
+    #         )
+    #     except CircuitOpenError as exc:
+    #         raise ModelRequestError("LLM circuit is open") from exc
+    #     except AuthenticationError as exc:
+    #         raise ModelAuthError("Model authentication failed") from exc
+    #     except (APIConnectionError, APIError) as exc:
+    #         raise ModelRequestError("Model request failed") from exc
 
 
 class ModelAuthError(Exception):

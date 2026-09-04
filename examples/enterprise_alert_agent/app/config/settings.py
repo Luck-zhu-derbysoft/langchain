@@ -9,11 +9,19 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
-
+    llm_provider: str = "dashscope"  # dashscope / openai / anthropic / azure
+    default_model: str = "qwen-plus"
+    fallback_model: str = "qwen-turbo"
     dashscope_api_key: str = ""
     model_name: str = "qwen-plus"
     fallback_model_name: str = "qwen-turbo"  # 主模型失败后的降级模型
-    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # 多 provider 配置
+    openai_api_key: str = "213"
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4o-mini"
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-3-5-sonnet-20241022"
     request_timeout_seconds: int = 30
     model_startup_probe_enabled: bool = True
     model_max_retries: int = 2
@@ -100,7 +108,7 @@ class Settings(BaseSettings):
     memory_redact_pii: bool = True
     memory_ttl_days: int = 7
     redis_cache_ttl_seconds: int = 3600
-    ingest_idempotency_ttl_seconds: int = 600# 幂等键保留时长，需覆盖客户端重试窗口
+    ingest_idempotency_ttl_seconds: int = 600  # 幂等键保留时长，需覆盖客户端重试窗口
     memory_summary_update_turn_threshold: int = 5
     cache_recent_turns_limit: int = 10
     # PostgreSQL 配置（替代 MySQL）
@@ -136,7 +144,6 @@ class Settings(BaseSettings):
     circuit_breaker_recovery_seconds: float = 30.0
     alert_webhook_url: str = ""
     alert_webhook_timeout_seconds: float = 5.0
-
 
 
 def _validate_secrets(s: "Settings") -> None:

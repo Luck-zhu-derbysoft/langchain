@@ -17,7 +17,7 @@ class EmbeddingClient:
     def __init__(self, tracer: LangSmithTracer) -> None:
         self._client = OpenAI(
             api_key=settings.dashscope_api_key,
-            base_url=settings.base_url,
+            base_url=settings.dashscope_base_url,
             timeout=settings.request_timeout_seconds,
         )
         self._tracer = tracer
