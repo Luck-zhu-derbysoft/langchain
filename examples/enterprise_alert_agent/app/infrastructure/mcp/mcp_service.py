@@ -47,8 +47,8 @@ class RemoteMCPClient:
             session = await stack.enter_async_context(
                 ClientSession(read_stream=read, write_stream=write)
             )
+            await asyncio.wait_for(session.initialize(), timeout=settings.mcp_connect_timeout_seconds)
 
-            await session.initialize()
             tools_results = await session.list_tools()
             self._tools_meta = [
                 {
@@ -139,3 +139,4 @@ class RemoteMCPClient:
         self._session = None
         self._tools_meta.clear()
         self._initialized = False
+        self._exit_stack = None
