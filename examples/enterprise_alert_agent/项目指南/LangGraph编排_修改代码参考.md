@@ -1,18 +1,5 @@
 # LangGraph 编排 —— 修改代码参考
 
-> 对应 `LEARNING_GUIDE.md` 技能清单第 3 块「Agent 核心技能」的 **LangGraph 编排** 项：
->
-> | 技能点 | 项目现状 | 落地练习 | 优先级 |
-> |---|---|---|---|
-> | LangGraph 编排 | ❌ 未图化 | L1→L4 `StateGraph` | 🟠 |
->
-> 依据 `ENTERPRISE_EVALUATION-v2.md` 的 **A0 试点**：把 `fault_analyzer.py` 的
-> **L1 重试 → L2 调参 → L3 仅 RAG → L4 人工** 决策链，用 `StateGraph` 的
-> 「节点 + 条件边 + 循环边 + 原生 `interrupt()`(HITL)」表达，并复用现有
-> `FaultAnalyzer` / `FaultContext` / `FaultDiagnosis`。
-
----
-
 ## 一、改动文件清单
 
 | 文件 | 操作 | 说明 |
@@ -369,6 +356,7 @@ class FaultRecoveryWorkflow:
             await graph.ainvoke(Command(resume=resume), config)
         # LangGraph 1.x：节点调 interrupt() 时 ainvoke 正常返回，靠 state.next
         # 判断是否停在 L4；human_question 从 tasks.interrupts 读取。
+        #`snapshot.next = ["l4_human_intervention"]` 代表下一步待执行节点是 L4，流程处于暂停
         snapshot = await graph.aget_state(config)
         if snapshot.next:
             outcome = self._to_outcome(snapshot.values, status="awaiting_human",
