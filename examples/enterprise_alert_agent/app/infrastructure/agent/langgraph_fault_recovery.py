@@ -9,12 +9,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Hashable
 from dataclasses import dataclass, field
-from tkinter import END
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import START, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, interrupt
 
@@ -39,10 +38,9 @@ def _append_trail(cur: list[str], upd: list[str] | str) -> list[str]:
     轨迹 = 可视化材料 + 审计记录 + 断点恢复时判断"已走到哪一档"的依据。
     """
     if isinstance(upd, str):
-        cur.append(*cur, *upd)
+        return [*cur, upd]
     else:
-        cur.extend(*cur, *upd)
-    return cur
+        return [*cur, *upd]
 
 
 class FaultRecoveryState(TypedDict, total=False):
@@ -251,7 +249,7 @@ class FaultRecoveryWorkflow:
             return {"resolved": True, "output": attempt.output, "trail": "l1_retry:ok"}
         n += 1
         if n >= self.max_retry_attempts:
-            return {"level": 2, "trail": "l1_retry:fail->L2"}
+            return {"level": 2, "attempts": n, "trail": "l1_retry:fail->L2"}
         return {
             "resolved": False,
             "attempts": n,
@@ -259,40 +257,40 @@ class FaultRecoveryWorkflow:
         }
 
     async def _l2_adjust(self, state: FaultRecoveryState) -> dict[str, Any]:
-        """L2 调整：降级执行 fallback 或 RAG-only。"""
-        if self.__executor.fallback is not None:
+        """L2 调参降级；失败后进入 L3。"""
+        if self.__executor.fallback is None:
             return {"level": 3, "trail": "l2_adjust:skip"}
         ctx = _ctx_from_dict(state.get("fault_context"))  # type: ignore
         diag = _diag_from_dict(state.get("diagnosis"))  # type: ignore
-        fallback_output = await self.__executor.fallback(ctx, diag)  # type: ignore
-        if fallback_output:
+        attempt = await self.__executor.fallback(ctx, diag)  # type: ignore
+        if attempt.success:
             return {
                 "resolved": True,
-                "output": fallback_output,
-                "trail": "l2_adjust:fallback",
+                "output": attempt.output,
+                "trail": "l2_adjust:ok",
             }
         return {
             "level": 3,
-            "error_message": fallback_output or diag.root_cause,
+            "error_message": attempt.output or diag.root_cause,
             "trail": "l2_adjust:fail->L3",
         }
 
     async def _l3_rag_only(self, state: FaultRecoveryState) -> dict[str, Any]:
-        """L3 RAG-only：降级执行 rag_only。"""
+        """L3 仅 RAG 兜底；失败后进入 L4。"""
         if self.__executor.rag_only is None:
             return {"level": 4, "trail": "l3_rag_only:skip"}
         ctx = _ctx_from_dict(state.get("fault_context"))  # type: ignore
         diag = _diag_from_dict(state.get("diagnosis"))  # type: ignore
-        rag_only_output = await self.__executor.rag_only(ctx, diag)  # type: ignore
-        if rag_only_output:
+        attempt = await self.__executor.rag_only(ctx, diag)  # type: ignore
+        if attempt.success:
             return {
                 "resolved": True,
-                "output": rag_only_output,
+                "output": attempt.output,
                 "trail": "l3_rag_only:ok",
             }
         return {
             "level": 4,
-            "error_message": rag_only_output or diag.root_cause,
+            "error_message": attempt.output or diag.root_cause,
             "trail": "l3_rag_only:fail->L4",
         }
 
@@ -425,17 +423,21 @@ class FaultRecoveryWorkflow:
         if resume is None:
             await graph.ainvoke(self._initial_state(ctx), config)
         else:
-            await graph.ainvoke(Command(resume), config)
+            await graph.ainvoke(Command(resume=resume), config)
         snapshot = await graph.aget_state(config)
+        human_question = None
         if snapshot.next:
-            outcome = self._to_outcome(
-                snapshot.values, status="awaiting_human", thread_id=thread_id
-            )
             for task in snapshot.tasks:
                 if task.interrupts:
-                    outcome.human_question = task.interrupts[0].value
+                    human_question = task.interrupts[0].value
                     break
-            return outcome
+            if human_question is not None:
+                return self._to_outcome(
+                    snapshot.values,
+                    status="awaiting_human",
+                    thread_id=thread_id,
+                    human_question=human_question,
+                )
         return self._to_outcome(
             snapshot.values,
             status="completed",
