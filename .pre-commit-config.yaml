@@ -7,9 +7,6 @@ repos:
       - id: check-yaml # validate YAML syntax
         args: ["--unsafe"] # allow custom tags
       - id: check-toml # validate TOML syntax
-      - id: end-of-file-fixer # ensure files end with a newline
-      - id: trailing-whitespace # remove trailing whitespace from lines
-        exclude: \.ambr$
 
   # Text normalization hooks for consistent formatting
   - repo: https://github.com/sirosen/texthooks
@@ -21,6 +18,14 @@ repos:
   # Per-package format and lint hooks for the monorepo
   - repo: local
     hooks:
+      - id: auto-fix-text
+        name: auto-fix text whitespace
+        language: python
+        entry: python scripts/pre_commit_auto_fix.py
+        files: \.(md|py|ps1|rst|toml|yaml|yml|json|txt)$
+        exclude: \.ambr$
+        pass_filenames: true
+        stages: [pre-commit]
       - id: core
         name: format and lint core
         language: system
