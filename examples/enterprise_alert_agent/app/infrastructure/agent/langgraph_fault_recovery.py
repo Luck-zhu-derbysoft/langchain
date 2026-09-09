@@ -167,7 +167,7 @@ def _diag_from_dict(d: dict[str, Any]) -> FaultDiagnosis:
 def retry_backoff_seconds(diag: FaultDiagnosis) -> float:
     """L1 退避秒数映射：与 fault_analyzer._recommend_retry 对齐。"""
     return {"wait_30s": 30.0, "wait_10s": 10.0, "immediate": 1.0}.get(
-        diag.retry_recommendation, 1.0
+        diag.retry_recommendation, 0.0
     )
 
 

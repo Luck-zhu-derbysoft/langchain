@@ -26,9 +26,15 @@ from app.infrastructure.agent.a2a_protocol import (
 from app.infrastructure.agent.agent_coordinator import MultiAgentOrchestrator
 from app.infrastructure.agent.agent_registry import AgentDescriptor, AgentRegistry
 from app.infrastructure.agent.intervention_handler import InterventionHandler
+from app.infrastructure.agent.langgraph_fault_recovery import (
+    FaultExecutor,
+    FaultRecoveryWorkflow,
+    RecoveryAttempt,
+    retry_backoff_seconds,
+)
 from app.infrastructure.cache.multi_tier_cache import multi_tier_cache
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
-from app.infrastructure.fault.fault_types import FaultContext, FaultDiagnosis, FaultSeverity
+from app.infrastructure.fault.fault_types import FaultContext
 from app.infrastructure.llm.model_client import (
     BudgetExceededError,
     ModelAuthError,
@@ -43,7 +49,6 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
 from app.infrastructure.queue.dlq_handler import dead_letter_queue
 from app.infrastructure.skill.registry import skill_registry
 from app.observability.alert_manager import AlertManager
-from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.observability.metrics import MetricsCollector
 from app.rag.retrieval.retriever import Retriever
@@ -1081,14 +1086,12 @@ class ChatService:
         tools_used: list[str] = []
         task_outputs: dict[str, str] = {}
         failed_task_ids: list[str] = []
-        tool_lock = Lock()
         assigned_agent_lock = Lock()
         task_agent_map: dict[str, str] = {}
 
         async def arun_one_task(subtask: SubTask) -> tuple[str, bool, str, int, bool, str]:
             logger.info("Executing subtask %s: %s", subtask.task_id, subtask.description)
 
-            used_fallback = False
             task_started = time.perf_counter()
             selected_agent = self.orchestrator.select_agent_by_subtask(subtask)
             subtask.assigned_agent_id = selected_agent.agent_id
@@ -1096,212 +1099,115 @@ class ChatService:
                 with assigned_agent_lock:
                     if subtask.assigned_agent_id not in state.assigned_agent_ids:
                         state.assigned_agent_ids.append(subtask.assigned_agent_id)
-            task_result: tuple[str, bool, str, int, bool, str] = (
-                subtask.task_id,
-                False,
-                "subtask_failed",
-                0,
-                False,
-                subtask.assigned_agent_id,
-            )
 
-            for attempt in range(self.config_manager.get_agent_max_iterations()):
-                if time.perf_counter() - task_started > self.config_manager.get_task_timeout():
-                    logger.warning(
-                        "Subtask %s timed out after %d seconds",
-                        subtask.task_id,
-                        self.config_manager.get_task_timeout(),
-                    )
-                    task_result = (
-                        subtask.task_id,
-                        False,
-                        "subtask_timeout",
-                        attempt,
-                        used_fallback,
-                        subtask.assigned_agent_id,
-                    )
-                    break
-                try:
-                    request = AgentTaskExecutionRequest(
-                        task_id=subtask.task_id,
-                        query=subtask.description,
-                        agent_id=subtask.assigned_agent_id,
-                        preferred_tool=subtask.preferred_tool,
-                        context={},
-                    )
-                    execution_result: AgentTaskExecutionResult = (
-                        await self.orchestrator.aexecute_with_callback_agent(
-                            request,
-                            callback_execute=lambda query, agent_id: self._aexecute_agent(
-                                query,
-                                request_id,
-                                agent_id,
-                                system_prompt,
-                                available_tools,
-                                skill_map,
-                                mcp_tool_map,
-                                tool_selection,
-                                parent_run,
-                            ),
-                        )
-                    )
-                    retry_times = attempt
-                    if not execution_result.success:
-                        raise RuntimeError(execution_result.output or "agent_execution_failed")
-                    if not execution_result.output:
-                        logger.warning("Subtask %s returned empty answer", subtask.task_id)
-                        raise RuntimeError("empty_subtask_answer")
+            async def _execute_subtask_core(query: str, agent_id: str) -> AgentTaskExecutionResult:
+                request = AgentTaskExecutionRequest(
+                    task_id=subtask.task_id,
+                    query=query,
+                    agent_id=agent_id,
+                    preferred_tool=subtask.preferred_tool,
+                    context={},
+                )
+                return await self.orchestrator.aexecute_with_callback_agent(
+                    request,
+                    callback_execute=lambda q, aid: self._aexecute_agent(
+                        q,
+                        request_id,
+                        aid,
+                        system_prompt,
+                        available_tools,
+                        skill_map,
+                        mcp_tool_map,
+                        tool_selection,
+                        parent_run,
+                    ),
+                )
 
-                    task_result = (
+            # 1. 尝试首次正常执行
+            initial_error = "agent_execution_failed"
+            try:
+                first_res = await _execute_subtask_core(
+                    subtask.description, subtask.assigned_agent_id
+                )
+                if first_res.success and first_res.output:
+                    return (
                         subtask.task_id,
                         True,
-                        execution_result.output,
-                        retry_times,
-                        used_fallback,
-                        subtask.assigned_agent_id,
-                    )
-                    break
-                except Exception as e:  # noqa: BLE001 - per-subtask failures are handled by retry/fallback logic
-                    last_error = str(e)
-                    retry_times = attempt + 1
-                    logger.warning(
-                        "Subtask %s attempt %d failed: %s", subtask.task_id, attempt + 1, e
-                    )
-                    backup_success = False
-                    task_result = (
-                        subtask.task_id,
+                        first_res.output,
+                        0,
                         False,
-                        last_error,
-                        retry_times,
-                        used_fallback,
                         subtask.assigned_agent_id,
                     )
+                initial_error = first_res.output or "agent_execution_failed"
+            except Exception as e:  # noqa: BLE001
+                initial_error = str(e)
 
-                    if (
-                        self.config_manager.get_enable_fallback_chain()
-                        and tool_selection
-                        and tool_selection.fallback_tools
-                    ):
-                        logger.info("Subtask %s will attempt fallback tools", subtask.task_id)
-                        for backup_tool in tool_selection.fallback_tools:
-                            if backup_tool not in skill_map:
-                                logger.warning(
-                                    "Fallback tool '%s' not available for subtask %s",
-                                    backup_tool,
-                                    subtask.task_id,
-                                )
-                                continue
-                            try:
-                                backup_result = await self._acall_tool_with_query(
-                                    skill_map[backup_tool], subtask.description
-                                )
-                                backup_summary = self.tool_result_to_string(backup_result)
-                                logger.info(
-                                    "Fallback tool '%s' succeeded for subtask %s",
-                                    backup_tool,
-                                    subtask.task_id,
-                                )
-                                with tool_lock:
-                                    tools_used.append(backup_tool)
-                                used_fallback = True
-                                backup_success = True
-                                task_result = (
-                                    subtask.task_id,
-                                    True,
-                                    backup_summary,
-                                    retry_times,
-                                    used_fallback,
-                                    subtask.assigned_agent_id,
-                                )
-                                break
-                            except Exception as backup_e:  # noqa: BLE001 - continue fallback chain
-                                logger.warning(
-                                    "Fallback tool '%s' also failed for subtask %s: %s",
-                                    backup_tool,
-                                    subtask.task_id,
-                                    backup_e,
-                                )
-                                last_error = str(backup_e)
-                                task_result = (
-                                    subtask.task_id,
-                                    False,
-                                    last_error,
-                                    retry_times,
-                                    used_fallback,
-                                    subtask.assigned_agent_id,
-                                )
+            async def _retry_handler(ctx: FaultContext, attempt_no: int) -> RecoveryAttempt:
+                diag = self.fault_analyzer.analyze(ctx)
+                backoff = retry_backoff_seconds(diag)
+                if backoff > 0:
+                    await asyncio.sleep(backoff)
+                res = await _execute_subtask_core(subtask.description, subtask.assigned_agent_id)
+                return RecoveryAttempt(success=res.success and bool(res.output), output=res.output)
 
-                        if backup_success:
-                            break
-
-                        fault_context = FaultContext(
-                            request_id=request_id,
-                            task_id=subtask.task_id,
-                            agent_id=subtask.assigned_agent_id,
-                            tool_name=subtask.preferred_tool or "unknown",
-                            error_message=str(e),
-                            error_type=type(e).__name__,
-                            retry_count=attempt,
-                            elapsed_time_ms=(time.perf_counter() - task_started) * 1000,
-                        )
-                        diagnosis: FaultDiagnosis = self.fault_analyzer.analyze(fault_context)
-                        severity_map = {
-                            FaultSeverity.LOW: AlertSeverity.INFO,
-                            FaultSeverity.MEDIUM: AlertSeverity.WARNING,
-                            FaultSeverity.HIGH: AlertSeverity.HIGH,
-                            FaultSeverity.CRITICAL: AlertSeverity.CRITICAL,
-                        }
-                        alert_severity = severity_map.get(diagnosis.severity, AlertSeverity.INFO)
-                        self.alert_manager.create_alert(
-                            alert_type=AlertTypes.FAULT_ALERT,
-                            severity=alert_severity,
-                            title=f"Fault in subtask {subtask.task_id}",
-                            message=str(diagnosis.root_cause),
-                            affected_resource=subtask.task_id,
-                            context={
-                                "agent_id": subtask.assigned_agent_id,
-                                "recovery_suggestions": diagnosis.recovery_suggestions,
-                                "can_retry": diagnosis.retry_feasible,
-                                "estimated_recovery_time": diagnosis.estimated_recovery_time,
-                            },
-                        )
-
-                        if not diagnosis.retry_feasible:
-                            logger.warning(
-                                "[%s] Fault not retryable, using fallback strategy",
-                                request_id,
+            async def _fallback_handler(ctx: FaultContext, diag: Any) -> RecoveryAttempt:
+                if not (tool_selection and tool_selection.fallback_tools):
+                    return RecoveryAttempt(success=False, output="")
+                for fallback_tool in tool_selection.fallback_tools:
+                    if fallback_tool in skill_map:
+                        try:
+                            res = await self._acall_tool_with_query(
+                                skill_map[fallback_tool], subtask.description
                             )
-                            last_error = diagnosis.root_cause
-                            break
+                            summary = self.tool_result_to_string(res)
+                            return RecoveryAttempt(success=True, output=summary)
+                        except Exception as e:  # noqa: BLE001
+                            return RecoveryAttempt(success=False, output=str(e))
+                return RecoveryAttempt(success=False, output="")
 
-                        if diagnosis.retry_recommendation == "wait_30s":
-                            backoff_time = 30
-                        elif diagnosis.retry_recommendation == "wait_10s":
-                            backoff_time = 10
-                        elif diagnosis.retry_recommendation == "immediate":
-                            backoff_time = 1
-                        else:
-                            break
+            async def _rag_only_handler(ctx: FaultContext, diag: Any) -> RecoveryAttempt:
+                try:
+                    rag_docs = await asyncio.to_thread(self.retriever.retrieve, subtask.description)
+                    summary = "\n".join([str(doc) for doc in rag_docs])
+                    return RecoveryAttempt(bool(summary), output=summary)
+                except Exception as e:  # noqa: BLE001
+                    return RecoveryAttempt(success=False, output=str(e))
 
-                        if attempt + 1 < self.config_manager.get_task_max_retries():
-                            logger.info(
-                                "Subtask %s will retry after %.2f seconds (attempt %d/%d) based on fault diagnosis",
-                                subtask.task_id,
-                                backoff_time,
-                                attempt + 1,
-                                self.config_manager.get_task_max_retries(),
-                            )
-                        await asyncio.sleep(backoff_time)
-
-            _, ok, msg, rt, _, _assigned_agent_id = task_result
-            if not ok:
+            ctx = FaultContext(
+                request_id=request_id,
+                task_id=subtask.task_id,
+                agent_id=subtask.assigned_agent_id,
+                tool_name=subtask.preferred_tool or "unknown",
+                error_message=initial_error,
+                error_type="SubtaskExecutionError",
+                retry_count=0,
+                elapsed_time_ms=(time.perf_counter() - task_started) * 1000,
+            )
+            workflow = FaultRecoveryWorkflow(
+                analyzer=self.fault_analyzer,
+                executor=FaultExecutor(_retry_handler, _fallback_handler, _rag_only_handler),
+                max_retry_attempts=self.config_manager.get_task_max_retries(),
+            )
+            # 4. 执行图，处理 HITL 挂起与完成
+            subtask_thread_id = f"{request_id}_{subtask.task_id}"
+            outcome = await workflow.run(ctx, thread_id=subtask_thread_id)
+            if outcome.status == "awaiting_human":
+                # 若停留在 L4，触发人工干预请求；恢复时传入用户的 decision ("retry" / "skip" / "abort")
                 logger.warning(
-                    "Subtask %s failed after %d retries, last error: %s ",
+                    "Subtask %s requires human intervention: %s",
                     subtask.task_id,
-                    rt,
-                    msg,
+                    outcome.human_question,
                 )
-            return task_result
+                # 此处可对接 self._intervention_handler 挂起并等待人工输入，示例默认 skip
+                outcome = await workflow.run(ctx, thread_id=subtask_thread_id, resume="skip")
+            return (
+                subtask.task_id,
+                outcome.resolved,
+                outcome.output or initial_error,
+                outcome.attempts,
+                outcome.level >= 2,
+                subtask.assigned_agent_id,
+            )
 
         task_status_map = {subtask.task_id: "queued" for subtask in decomposition.subtasks}
         batches: list[list[SubTask]] = self._build_dependency_batches(decomposition)
