@@ -49,6 +49,7 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
 from app.infrastructure.queue.dlq_handler import dead_letter_queue
 from app.infrastructure.skill.registry import skill_registry
 from app.observability.alert_manager import AlertManager
+from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.observability.metrics import MetricsCollector
 from app.rag.retrieval.retriever import Retriever
@@ -1193,11 +1194,34 @@ class ChatService:
             outcome = await workflow.run(ctx, thread_id=subtask_thread_id)
             if outcome.status == "awaiting_human":
                 # 若停留在 L4，触发人工干预请求；恢复时传入用户的 decision ("retry" / "skip" / "abort")
+
+                diag_info = outcome.human_question or {}
+                root_cause = diag_info.get("root_cause", initial_error)
                 logger.warning(
-                    "Subtask %s requires human intervention: %s",
+                    "[%s] Subtask %s entered L4 HITL, root_cause: %s",
+                    request_id,
                     subtask.task_id,
-                    outcome.human_question,
+                    root_cause,
                 )
+                # 2. 登记到人工干预处理器（待后台人工跟进）
+                self._intervention_handler.create_intervention_request(
+                    task_id=subtask.task_id,
+                    reason=root_cause,
+                    user_id=state.active_agent_id if state else "system",
+                )
+                self.alert_manager.create_alert(
+                    alert_type=AlertTypes.FAULT_ALERT,
+                    severity=AlertSeverity.HIGH,
+                    title=f"子任务 {subtask.task_id} 需要人工干预",
+                    message=f"错误根因: {root_cause}",
+                    affected_resource=subtask.task_id,
+                    context={
+                        "thread_id": subtask_thread_id,
+                        "suggestions": diag_info.get("suggestions", []),
+                        "options": diag_info.get("options", ["retry", "skip", "abort"]),
+                    },
+                )
+
                 # 此处可对接 self._intervention_handler 挂起并等待人工输入，示例默认 skip
                 outcome = await workflow.run(ctx, thread_id=subtask_thread_id, resume="skip")
             return (
