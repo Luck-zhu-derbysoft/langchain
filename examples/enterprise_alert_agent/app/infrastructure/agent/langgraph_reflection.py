@@ -56,10 +56,16 @@ class ReflectionWorkflow:
         trail = [*state.get("trail", [])]
         try:
             decision = await self.execute.review(state["query"], state["draft"], state["evidence"])
-        except Exception as e:
-            logger.error(f"Review failed: {e}")
+        except Exception as exc:
+            logger.exception("Review failed")
             trail.append("review:error->fail_open")
-            return {"approved": False, "score": 0.0, "feedback": "", "trail": trail}
+            return {
+                "approved": True,
+                "score": 0.0,
+                "feedback": "",
+                "review_error": str(exc),
+                "trail": trail,
+            }
         trail.append("review:approved" if decision.approved else "review:rejected")
         return {
             "approved": decision.approved,

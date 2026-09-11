@@ -734,8 +734,8 @@ class ChatService:
                 mcp_tool_metadata = get_tools_metadata()
                 # 合并：本地工具 + MCP远端工具，全部给到LLM的可用工具列表
                 available_tools.extend(mcp_tool_metadata)
-        except Exception as e:
-            logger.warning("Failed to resolve MCP tools: %s", e)
+        except Exception as exc:  # noqa: BLE001 - MCP failure falls back to local tools
+            logger.warning("Failed to resolve MCP tools: %s", exc)
             mcp_tool_map = {}
             mcp_tool_metadata = []
         local_keys = set(skill_registry.skills_map().keys())
@@ -1366,7 +1366,7 @@ class ChatService:
             review_draft: str,
             review_evidence: str,
         ) -> ReviewDecision:
-            if "reviewer_agent" not in agentState.active_agent_id:
+            if "reviewer_agent" not in agentState.assigned_agent_ids:
                 agentState.assigned_agent_ids.append("reviewer_agent")
             prompt = (
                 "你是独立审阅 Agent。检查回答的正确性、完整性、证据一致性和不确定性声明。"
@@ -1399,7 +1399,7 @@ class ChatService:
             revise_evidence: str,
             feedback: str,
         ) -> str:
-            if "reviser_agent" not in agentState.active_agent_id:
+            if "reviser_agent" not in agentState.assigned_agent_ids:
                 agentState.assigned_agent_ids.append("reviser_agent")
             prompt = (
                 "你是修订 Agent。根据审阅意见修订答案。"
@@ -1419,7 +1419,8 @@ class ChatService:
             return str(revised or "").strip()
 
         workflow = ReflectionWorkflow(
-            execute=ReflectionExecutor(_review_handler, _revise_handler), max_rounds=3
+            execute=ReflectionExecutor(_review_handler, _revise_handler),
+            max_rounds=settings.reflection_max_rounds,
         )
         outcome = await workflow.run(
             query=query,
