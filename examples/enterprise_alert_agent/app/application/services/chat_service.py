@@ -32,6 +32,11 @@ from app.infrastructure.agent.langgraph_fault_recovery import (
     RecoveryAttempt,
     retry_backoff_seconds,
 )
+from app.infrastructure.agent.langgraph_reflection import (
+    ReflectionExecutor,
+    ReflectionWorkflow,
+    ReviewDecision,
+)
 from app.infrastructure.cache.multi_tier_cache import multi_tier_cache
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.fault.fault_types import FaultContext
@@ -79,6 +84,9 @@ class AgentState:
     fallback_strategy: str = ""
     active_agent_id: str = "router_agent"
     assigned_agent_ids: list[str] = field(default_factory=list)
+    reflection_rounds: int = 0
+    reflection_approved: bool = False
+    reflection_trail: list[str] = field(default_factory=list)
 
 
 class ToolsResolution(TypedDict):
@@ -282,6 +290,15 @@ class ChatService:
                 state.parallel_task_results = parallel_results
                 state.failed_task_ids = parallel_results.failed_task_ids
                 answer = self._merge_multi_task_results(parallel_results)
+                if settings.reflection_enabled:
+                    answer = await self._areflect_multi_agent_answer(
+                        query=req.query,
+                        draft_answer=answer,
+                        task_result=parallel_results,
+                        agentState=state,
+                        parent_run=ask_run,
+                    )
+
                 for failed_task_id in parallel_results.failed_task_ids:
                     await dead_letter_queue.add(
                         task_id=failed_task_id,
@@ -1328,6 +1345,91 @@ class ChatService:
         if task_result.failed_task_ids:
             lines.append(f"以下子任务失败: {', '.join(task_result.failed_task_ids)}")
         return "\n".join(lines)
+
+    async def _areflect_multi_agent_answer(
+        self,
+        *,
+        query: str,
+        draft_answer: str,
+        task_result: ParallelTaskResult,
+        agentState: AgentState,
+        parent_run: RunTree | None = None,
+    ) -> str:
+        evidence = json.dumps(
+            task_result.task_outputs,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        async def _review_handler(
+            review_query: str,
+            review_draft: str,
+            review_evidence: str,
+        ) -> ReviewDecision:
+            if "reviewer_agent" not in agentState.active_agent_id:
+                agentState.assigned_agent_ids.append("reviewer_agent")
+            prompt = (
+                "你是独立审阅 Agent。检查回答的正确性、完整性、证据一致性和不确定性声明。"
+                "\n不得补充证据中不存在的事实。"
+                '\n只输出 JSON：{"approved": true, "score": 0.0, "feedback": "..."}'
+                f"\n通过阈值：{settings.reflection_min_score}"
+                f"\n\n子任务证据：\n{review_evidence}"
+                f"\n\n待审阅回答：\n{review_draft}"
+            )
+            raw = await self.model_client.achat(
+                review_query,
+                prompt,
+                tools=[],
+                parent_run=parent_run,
+                _token_counter=agentState.token_counter,
+            )
+            parsed = _safe_parse_intent_json(str(raw or "{}"))
+            approve_row = parsed.get("approved", False)
+            score = float(parsed.get("score", 0.0))  # type: ignore
+            feedback = str(parsed.get("feedback", ""))
+            return ReviewDecision(
+                approved=bool(approve_row and score >= settings.reflection_min_score),
+                score=score,
+                feedback=feedback,
+            )
+
+        async def _revise_handler(
+            revise_query: str,
+            revise_draft: str,
+            revise_evidence: str,
+            feedback: str,
+        ) -> str:
+            if "reviser_agent" not in agentState.active_agent_id:
+                agentState.assigned_agent_ids.append("reviser_agent")
+            prompt = (
+                "你是修订 Agent。根据审阅意见修订答案。"
+                "\n只能使用给定证据，不得编造数据，不得调用工具。"
+                "\n直接输出修订后的最终答案。"
+                f"\n\n子任务证据：\n{revise_evidence}"
+                f"\n\n原回答：\n{revise_draft}"
+                f"\n\n审阅意见：\n{feedback}"
+            )
+            revised = await self.model_client.achat(
+                revise_query,
+                prompt,
+                tools=[],
+                parent_run=parent_run,
+                _token_counter=agentState.token_counter,
+            )
+            return str(revised or "").strip()
+
+        workflow = ReflectionWorkflow(
+            execute=ReflectionExecutor(_review_handler, _revise_handler), max_rounds=3
+        )
+        outcome = await workflow.run(
+            query=query,
+            draft=draft_answer,
+            evidence=evidence,
+        )
+        agentState.reflection_rounds = outcome.rounds
+        agentState.reflection_approved = outcome.approved
+        agentState.reflection_trail = outcome.trail
+        return outcome.answer
 
     @staticmethod
     async def _aapply_tool(tool_fn: SkillFunc, args: dict[str, Any]) -> Any:

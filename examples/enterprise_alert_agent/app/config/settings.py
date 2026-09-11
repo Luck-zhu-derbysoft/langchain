@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     agent_max_iterations: int = (
         3  # 允许 Agent 思考与调用工具的最大轮数            # LLM 失败重试次数
     )
+    reflection_enabled: bool = True
+    reflection_max_rounds: int = 2  # 最大反思轮数
+    reflection_min_score: float = 0.8  # 反思通过的最低分数
     task_max_retries: int = 2
     task_initial_backoff_seconds: float = 0.5
     task_max_workers: int = 4
