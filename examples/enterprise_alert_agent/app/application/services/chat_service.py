@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, TypedDict, cast
 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langsmith.run_trees import RunTree
 
 from app.config.dynamic_settings import ConfigManager
@@ -51,6 +52,7 @@ from app.infrastructure.mcp.mcp_client import get_tools_metadata
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
     MemoryScope,
     RedisPostgresConversationMemoryStore,
+    TaskStatus,
 )
 from app.infrastructure.queue.dlq_handler import dead_letter_queue
 from app.infrastructure.skill.registry import skill_registry
@@ -299,6 +301,7 @@ class ChatService:
                     system_prompt=system_prompt,
                     available_tools=available_tools,
                     skill_map=SKILL_MAP,
+                    history_scope=history_scope,
                     mcp_tool_map=mcp_tool_map,
                     tool_selection=tool_selection,
                     state=state,
@@ -1119,6 +1122,7 @@ class ChatService:
         available_tools: list[dict[str, Any]],
         skill_map: dict[str, SkillFunc],
         mcp_tool_map: dict[str, SkillFunc],
+        history_scope: MemoryScope,
         tool_selection: ToolSelection | None = None,
         state: AgentState | None = None,
         parent_run: RunTree | None = None,
@@ -1130,12 +1134,23 @@ class ChatService:
         assigned_agent_lock = Lock()
         task_agent_map: dict[str, str] = {}
 
-        async def arun_one_task(subtask: SubTask) -> tuple[str, bool, str, int, bool, str]:
+        async def arun_one_task(
+            subtask: SubTask,
+        ) -> tuple[str, bool, str, int, bool, str, TaskStatus]:
             logger.info("Executing subtask %s: %s", subtask.task_id, subtask.description)
 
             task_started = time.perf_counter()
             selected_agent = self.orchestrator.select_agent_by_subtask(subtask)
             subtask.assigned_agent_id = selected_agent.agent_id
+            await self.memory.aupsert_task_state(
+                request_id=request_id,
+                task_id=subtask.task_id,
+                scope=history_scope,
+                description=subtask.description,
+                status=TaskStatus.RUNNING,
+                depends_on=subtask.depends_on,
+                assigned_agent_id=subtask.assigned_agent_id,
+            )
             if state is not None:
                 with assigned_agent_lock:
                     if subtask.assigned_agent_id not in state.assigned_agent_ids:
@@ -1178,6 +1193,7 @@ class ChatService:
                         0,
                         False,
                         subtask.assigned_agent_id,
+                        TaskStatus.SUCCEEDED,
                     )
                 initial_error = first_res.output or "agent_execution_failed"
             except Exception as e:  # noqa: BLE001
@@ -1224,11 +1240,17 @@ class ChatService:
                 retry_count=0,
                 elapsed_time_ms=(time.perf_counter() - task_started) * 1000,
             )
-            workflow = FaultRecoveryWorkflow(
-                analyzer=self.fault_analyzer,
-                executor=FaultExecutor(_retry_handler, _fallback_handler, _rag_only_handler),
-                max_retry_attempts=self.config_manager.get_task_max_retries(),
-            )
+            # 启动时创建一次
+            async with AsyncPostgresSaver.from_conn_string(
+                settings.langgraph_checkpoint_dsn
+            ) as checkpointer:
+                await checkpointer.setup()
+                workflow = FaultRecoveryWorkflow(
+                    analyzer=self.fault_analyzer,
+                    executor=FaultExecutor(_retry_handler, _fallback_handler, _rag_only_handler),
+                    max_retry_attempts=self.config_manager.get_task_max_retries(),
+                    checkpointer=checkpointer,
+                )
             # 4. 执行图，处理 HITL 挂起与完成
             subtask_thread_id = f"{request_id}_{subtask.task_id}"
             outcome = await workflow.run(ctx, thread_id=subtask_thread_id)
@@ -1263,7 +1285,28 @@ class ChatService:
                 )
 
                 # 此处可对接 self._intervention_handler 挂起并等待人工输入，示例默认 skip
-                outcome = await workflow.run(ctx, thread_id=subtask_thread_id, resume="skip")
+                # outcome = await workflow.run(ctx, thread_id=subtask_thread_id, resume="skip")
+                await self.memory.aupsert_task_state(
+                    request_id=request_id,
+                    task_id=subtask.task_id,
+                    scope=history_scope,
+                    description=subtask.description,
+                    status=TaskStatus.WAITING_HUMAN,
+                    assigned_agent_id=subtask.assigned_agent_id,
+                    depends_on=subtask.depends_on,
+                    error_message=str(root_cause),
+                    retry_count=outcome.attempts,
+                )
+                return (
+                    subtask.task_id,
+                    False,
+                    "任务等待人工决策。",
+                    outcome.attempts,
+                    True,
+                    subtask.assigned_agent_id,
+                    TaskStatus.WAITING_HUMAN,
+                )
+
             return (
                 subtask.task_id,
                 outcome.resolved,
@@ -1271,9 +1314,19 @@ class ChatService:
                 outcome.attempts,
                 outcome.level >= 2,
                 subtask.assigned_agent_id,
+                TaskStatus.SUCCEEDED if outcome.resolved else TaskStatus.FAILED,
             )
 
         task_status_map = {subtask.task_id: "queued" for subtask in decomposition.subtasks}
+        for subtask in decomposition.subtasks:
+            await self.memory.aupsert_task_state(
+                request_id=request_id,
+                task_id=subtask.task_id,
+                scope=history_scope,
+                description=subtask.description,
+                status=TaskStatus.QUEUED,
+                depends_on=subtask.depends_on,
+            )
         batches: list[list[SubTask]] = self._build_dependency_batches(decomposition)
 
         for batch in batches:
@@ -1289,6 +1342,18 @@ class ChatService:
                     )
                     task_status_map[subtask.task_id] = "skipped"
                     failed_task_ids.append(subtask.task_id)
+                    await self.memory.aupsert_task_state(
+                        request_id=request_id,
+                        task_id=subtask.task_id,
+                        scope=history_scope,
+                        description=subtask.description,
+                        status=TaskStatus.SKIPPED,
+                        assigned_agent_id=subtask.assigned_agent_id,
+                        result="",
+                        error_message="Skipped due to failed dependencies",
+                        retry_count=0,
+                        depends_on=subtask.depends_on,
+                    )
                     continue
                 runnable_subtasks.append(subtask)
             if not runnable_subtasks:
@@ -1303,7 +1368,7 @@ class ChatService:
             async def _limited(
                 subtask: SubTask,
                 _sem: asyncio.Semaphore = semaphore,
-            ) -> tuple[str, bool, str, int, bool, str]:
+            ) -> tuple[str, bool, str, int, bool, str, TaskStatus]:
                 async with _sem:
                     return await arun_one_task(subtask)
 
@@ -1311,10 +1376,26 @@ class ChatService:
                 task_status_map[subtask.task_id] = "running"
 
             results = await asyncio.gather(*(_limited(st, semaphore) for st in runnable_subtasks))
-            for tid, success, out, retry_times, used_fallback, agent_id in results:
+            for tid, success, out, retry_times, used_fallback, agent_id, status in results:
                 task_agent_map[tid] = agent_id
+                task_status_map[tid] = status.value
+                if status is TaskStatus.WAITING_HUMAN:
+                    continue
+                await self.memory.aupsert_task_state(
+                    request_id=request_id,
+                    task_id=tid,
+                    scope=history_scope,
+                    description=next(
+                        item.description for item in decomposition.subtasks if item.task_id == tid
+                    ),
+                    status=status,
+                    assigned_agent_id=agent_id,
+                    result=out if success else "",
+                    error_message="" if success else out,
+                    retry_count=retry_times,
+                )
+
                 if success:
-                    task_status_map[tid] = "success"
                     task_outputs[tid] = out
                     logger.info(
                         "Subtask %s completed successfully (retries=%d, used_fallback=%s, assigned_agent=%s)",

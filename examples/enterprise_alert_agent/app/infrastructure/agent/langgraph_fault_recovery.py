@@ -354,6 +354,9 @@ class FaultRecoveryWorkflow:
         """编译成 StateGraph。"""
         if self._compiled_graph is None:
             self._compiled_graph = self.build().compile(
+                # 这意味着服务重启后，L4 中断点会丢失。
+                # agent_task_state 虽然在 PG 中，但没有 LangGraph snapshot，无法 resume。
+                # 生产环境应改为由应用启动时创建的 AsyncPostgresSaver 注入：
                 checkpointer=self.__checkpointer or MemorySaver()
             )
         return self._compiled_graph

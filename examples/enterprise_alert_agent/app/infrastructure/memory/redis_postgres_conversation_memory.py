@@ -22,7 +22,12 @@ from sqlmodel import SQLModel
 
 from app.config.settings import settings
 from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
-from app.infrastructure.memory.models import ConversationMemorySession, ConversationMemoryTurn
+from app.infrastructure.memory.models import (
+    AgentTaskState,
+    ConversationMemorySession,
+    ConversationMemoryTurn,
+    TaskStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -388,3 +393,55 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         value = re.sub(r"1[3-9]\d{9}", "[REDACTED_PHONE]", value)
         value = re.sub(r"\b\d{15,18}[0-9Xx]?\b", "[REDACTED_ID]", value)
         return value
+
+    async def aupsert_task_state(
+        self,
+        *,
+        request_id: str,
+        task_id: str,
+        scope: MemoryScope,
+        description: str,
+        status: TaskStatus,
+        assigned_agent_id: str = "",
+        depends_on: list[str] | None = None,
+        result: str = "",
+        error_message: str = "",
+        retry_count: int = 0,
+    ) -> None:
+        async with self._apg_session() as session:
+            exiting = await session.get(
+                AgentTaskState,
+                {
+                    "request_id": request_id,
+                    "task_id": task_id,
+                },
+            )
+            now = datetime.now(UTC)
+            if exiting is None:
+                task_state = AgentTaskState(
+                    request_id=request_id,
+                    task_id=task_id,
+                    tenant_id=scope.tenant_id,
+                    user_id=scope.user_id,
+                    thread_id=scope.thread_id,
+                    description=description,
+                    status=status.value,
+                    assigned_agent_id=assigned_agent_id,
+                    depends_on=depends_on or [],
+                    result=result,
+                    error_message=error_message,
+                    retry_count=retry_count,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(task_state)
+                return
+            else:
+                exiting.description = description
+                exiting.status = status.value
+                exiting.assigned_agent_id = assigned_agent_id
+                exiting.result = result
+                exiting.error_message = error_message
+                exiting.retry_count = retry_count
+                exiting.updated_at = now
+                exiting.version += 1

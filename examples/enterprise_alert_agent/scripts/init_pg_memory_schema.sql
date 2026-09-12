@@ -77,3 +77,24 @@ CREATE INDEX IF NOT EXISTS idx_turn_active_scope
 -- \dt conversation_memory_*
 -- SELECT * FROM conversation_memory_session LIMIT 1;
 -- SELECT * FROM conversation_memory_turn   LIMIT 1;
+CREATE TABLE IF NOT EXISTS agent_task_state (
+    request_id        VARCHAR(128) NOT NULL,
+    task_id           VARCHAR(128) NOT NULL,
+    tenant_id         VARCHAR(128) NOT NULL,
+    user_id           VARCHAR(128) NOT NULL,
+    thread_id         VARCHAR(128) NOT NULL,
+    status            VARCHAR(32) NOT NULL,
+    description       TEXT NOT NULL,
+    assigned_agent_id VARCHAR(128) NOT NULL DEFAULT '',
+    depends_on        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    result            TEXT NOT NULL DEFAULT '',
+    error_message     TEXT NOT NULL DEFAULT '',
+    retry_count       INTEGER NOT NULL DEFAULT 0,
+    version           INTEGER NOT NULL DEFAULT 0,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (request_id, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_state_request
+    ON agent_task_state (request_id, created_at);

@@ -8,6 +8,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from app.infrastructure.memory.models import TaskStatus
+
 
 class MessageType(str, Enum):
     """消息类型"""
@@ -194,6 +196,8 @@ class SubTask:
     priority: int = 0
     """分配的智能体 ID"""
     assigned_agent_id: str = ""
+    status: TaskStatus = TaskStatus.PENDING
+    """子任务状态"""
 
 
 @dataclass

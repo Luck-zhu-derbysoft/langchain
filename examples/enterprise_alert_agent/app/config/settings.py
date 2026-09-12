@@ -129,6 +129,7 @@ class Settings(BaseSettings):
     pg_user: str = "postgres"
     pg_password: str = ""
     pg_ssl_mode: str = "prefer"
+    langgraph_checkpoint_dsn: str = ""
     # --- MCP 配置 ---
     mcp_service_url: str = ""
     mcp_enabled: bool = True
