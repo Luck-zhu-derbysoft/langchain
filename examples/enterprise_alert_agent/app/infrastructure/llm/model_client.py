@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -7,6 +8,7 @@ from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationErro
 
 from app.config.settings import settings
 from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
+from app.infrastructure.llm.context_budget import estimate_tokens
 from app.observability.langsmith_tracer import LangSmithTracer
 
 
@@ -56,6 +58,7 @@ class ModelClient:
             },
             tags=["llm", selected_model, "async"],
         )
+        self._validate_input_budget(user_query, system_prompt, tools)
         try:
             completion = None
             for provider, model_name in candidates:
@@ -71,6 +74,7 @@ class ModelClient:
                         {"role": "user", "content": user_query},
                     ],
                     "temperature": 0.1,
+                    "max_tokens": settings.llm_output_token_budget,
                 }
                 if tools:
                     payload["tools"] = tools
@@ -159,6 +163,7 @@ class ModelClient:
             inputs={"user_query": user_query, "stream": True, "model": selected_model},
             tags=["llm", selected_model, "async", "stream"],
         )
+        self._validate_input_budget(user_query, system_prompt, tools)
 
         try:
             for provider, model_name in candidates:
@@ -175,6 +180,7 @@ class ModelClient:
                         {"role": "user", "content": user_query},
                     ],
                     "temperature": 0.1,
+                    "max_tokens": settings.llm_output_token_budget,
                 }
                 if tools:
                     payload["tools"] = tools
@@ -255,30 +261,22 @@ class ModelClient:
             ("dashscope", settings.fallback_model),
         ]
 
-    # def probe(self) -> None:
-    #     """Run a lightweight provider check during service startup."""
-    #     provider, model_name = self._route_request()
-    #     client = self._client_map.get(provider)
-    #     if not client:
-    #         raise ModelRequestError(f"No client found for provider: {provider}")
-    #     try:
-    #         self._circuit_breaker.call(
-    #             lambda: client.chat.completions.create(
-    #                 model=model_name,
-    #                 messages=[
-    #                     {"role": "system", "content": "health-check"},
-    #                     {"role": "user", "content": "ping"},
-    #                 ],
-    #                 temperature=0,
-    #                 max_tokens=1,
-    #             )
-    #         )
-    #     except CircuitOpenError as exc:
-    #         raise ModelRequestError("LLM circuit is open") from exc
-    #     except AuthenticationError as exc:
-    #         raise ModelAuthError("Model authentication failed") from exc
-    #     except (APIConnectionError, APIError) as exc:
-    #         raise ModelRequestError("Model request failed") from exc
+    @staticmethod
+    def _validate_input_budget(
+        user_query: str,
+        system_prompt: str,
+        tools: list[dict[str, Any]] | None,
+    ) -> None:
+        tools_text = json.dumps(tools or [], ensure_ascii=False, separators=(",", ":"))
+        estimated_tokens = (
+            estimate_tokens(user_query)
+            + estimate_tokens(system_prompt)
+            + estimate_tokens(tools_text)
+        )
+        if estimated_tokens > settings.llm_input_token_budget:
+            raise BudgetExceededError(
+                f"Estimated token usage {estimated_tokens} exceeds the maximum limit of {settings.llm_input_token_budget}."
+            )
 
 
 class ModelAuthError(Exception):

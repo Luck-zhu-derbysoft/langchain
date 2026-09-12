@@ -40,6 +40,7 @@ from app.infrastructure.agent.langgraph_reflection import (
 from app.infrastructure.cache.multi_tier_cache import multi_tier_cache
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.fault.fault_types import FaultContext
+from app.infrastructure.llm.context_budget import trim_text
 from app.infrastructure.llm.model_client import (
     BudgetExceededError,
     ModelAuthError,
@@ -241,7 +242,14 @@ class ChatService:
                 thread_id=req.thread_id,
             )
             memory_context = await self.memory.aload_context(history_scope, max_turns=5)
-            history_prompt_context = memory_context.as_prompt_text()
+            history_prompt_context = trim_text(
+                memory_context.as_prompt_text(), settings.context_history_token_budget, keep="tail"
+            )
+            logger.info(
+                "[%s] Context budget: history_tokens_estimated=%d",
+                request_id,
+                len(history_prompt_context) // 2,
+            )
 
             context = ""
             docs: list[dict[str, str]] = []
@@ -256,8 +264,17 @@ class ChatService:
                     parent_run=ask_run,
                 )
                 docs = docs[: settings.context_top_k]
-                context = "\n".join([f"[{d['source_id']}] {d['content']}" for d in docs])
+                raw_context = "\n".join([f"[{d['source_id']}] {d['content']}" for d in docs])
+                context = trim_text(
+                    raw_context, settings.context_retrieval_token_budget, keep="head"
+                )
                 citations = [Citation(source_id=d["source_id"], snippet=d["content"]) for d in docs]
+                logger.info(
+                    "[%s] Context budget: docs=%d context_chars=%d",
+                    request_id,
+                    len(docs),
+                    len(context),
+                )
 
             system_prompt = self._build_base_system_prompt(
                 context=context,
@@ -814,7 +831,7 @@ class ChatService:
             )
             response_message = await self.model_client.achat(
                 user_query=query,
-                system_prompt=system_prompt,
+                system_prompt=self._fit_agent_prompt(system_prompt),
                 tools=available_tools if not state.read_only_mode else [],
                 return_message=True,
                 parent_run=parent_run,
@@ -847,6 +864,7 @@ class ChatService:
                     state.tool_error_count += 1
                     error_msg = f"未知工具: {tool_name}，当前可调用工具: {list(skill_map.keys())}"
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                    system_prompt = self._fit_agent_prompt(system_prompt)
                     if state.tool_error_count >= settings.agent_tool_failure_threshold:
                         state.read_only_mode = True
                         logger.warning("Tool failure threshold reached, forcing summary phase")
@@ -863,13 +881,15 @@ class ChatService:
                     if not isinstance(actual_args, dict):
                         raise TypeError("工具参数解析错误，应该是一个 JSON 对象。")
                     result = await self._aapply_tool(skill_map[tool_name], actual_args)
-                    tool_summary = self.tool_result_to_string(result)
+                    tool_summary = self._fit_tool_result(self.tool_result_to_string(result))
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
+                    system_prompt = self._fit_agent_prompt(system_prompt)
                     logger.debug("tool result (async): %s", tool_summary[:200])
                 except json.JSONDecodeError:
                     state.tool_error_count += 1
                     error_msg = "工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                    system_prompt = self._fit_agent_prompt(system_prompt)
                     logger.warning("%s", error_msg)
                     if state.tool_error_count >= settings.agent_tool_failure_threshold:
                         state.read_only_mode = True
@@ -879,6 +899,7 @@ class ChatService:
                     state.tool_error_count += 1
                     error_msg = f"工具调用失败: {e}"
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
+                    system_prompt = self._fit_agent_prompt(system_prompt)
                     logger.warning("%s", error_msg)
 
                     if (
@@ -898,7 +919,9 @@ class ChatService:
                                 backup_result = await self._aapply_tool(
                                     skill_map[backup_tool], actual_args
                                 )
-                                backup_summary = self.tool_result_to_string(backup_result)
+                                backup_summary = self._fit_tool_result(
+                                    self.tool_result_to_string(backup_result)
+                                )
                                 system_prompt += (
                                     f"\n\n工具调用结果 ({backup_tool} [备选]):\n{backup_summary}"
                                 )
@@ -1529,3 +1552,21 @@ class ChatService:
             batches.append(batch)
             resolve.update(ready_ids)
         return batches
+
+    @staticmethod
+    def _fit_agent_prompt(system_prompt: str) -> str:
+        """限制 Agent 多轮工具结果累积后的系统提示词大小。"""
+        return trim_text(
+            system_prompt,
+            settings.llm_input_token_budget,
+            keep="both",
+        )
+
+    @staticmethod
+    def _fit_tool_result(tool_result: str) -> str:
+        """限制单次工具结果占用的上下文预算。"""
+        return trim_text(
+            tool_result,
+            settings.context_tool_result_token_budget,
+            keep="head",
+        )

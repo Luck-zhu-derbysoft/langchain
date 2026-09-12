@@ -74,8 +74,16 @@ class Settings(BaseSettings):
     retrieval_max_history_turns: int = 2
     retrieval_query_rewrite_enabled: bool = True
     retrieval_use_bm25: bool = True  # 关闭则退化为纯稠密
+    # 单次请求内所有 LLM 调用的累计 token 上限
+    max_tokens_per_request: int = 50000
+    # --- 上下文工程 / Token 预算 ---
+    llm_input_token_budget: int = 12000
+    llm_output_token_budget: int = 2048
 
-    max_tokens_per_request: int = 200000
+    context_history_token_budget: int = 3000
+    context_retrieval_token_budget: int = 5000
+    context_tool_result_token_budget: int = 3000
+
     metrics_max_requests: int = 10000
     metrics_max_latency_samples_per_request: int = 100
     ingest_max_text_bytes: int = 1 * 1024 * 1024
