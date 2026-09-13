@@ -110,6 +110,7 @@ class ChatService:
         _metrics_collector: MetricsCollector,
         agent_registry: AgentRegistry | None = None,
         orchestrator: MultiAgentOrchestrator | None = None,
+        fault_checkpointer: AsyncPostgresSaver | None = None,
     ) -> None:
         self.model_client = model_client
         self.retriever = retriever
@@ -127,6 +128,7 @@ class ChatService:
         self.max_retries = self.config_manager.get_agent_max_iterations()
         self.task_timeout = self.config_manager.get_task_timeout()
         self.max_parallel_tasks = self.config_manager.get_task_max_workers()
+        self.fault_checkpointer = fault_checkpointer
 
     async def aask_stream(
         self, req: ChatRequest, *, parent_run: RunTree | None = None
@@ -1240,17 +1242,14 @@ class ChatService:
                 retry_count=0,
                 elapsed_time_ms=(time.perf_counter() - task_started) * 1000,
             )
-            # 启动时创建一次
-            async with AsyncPostgresSaver.from_conn_string(
-                settings.langgraph_checkpoint_dsn
-            ) as checkpointer:
-                await checkpointer.setup()
-                workflow = FaultRecoveryWorkflow(
-                    analyzer=self.fault_analyzer,
-                    executor=FaultExecutor(_retry_handler, _fallback_handler, _rag_only_handler),
-                    max_retry_attempts=self.config_manager.get_task_max_retries(),
-                    checkpointer=checkpointer,
-                )
+            if self.fault_checkpointer is None:
+                raise RuntimeError("LangGraph PostgreSQL checkpointer is not initialized")
+            workflow = FaultRecoveryWorkflow(
+                analyzer=self.fault_analyzer,
+                executor=FaultExecutor(_retry_handler, _fallback_handler, _rag_only_handler),
+                max_retry_attempts=self.config_manager.get_task_max_retries(),
+                checkpointer=self.fault_checkpointer,
+            )
             # 4. 执行图，处理 HITL 挂起与完成
             subtask_thread_id = f"{request_id}_{subtask.task_id}"
             outcome = await workflow.run(ctx, thread_id=subtask_thread_id)

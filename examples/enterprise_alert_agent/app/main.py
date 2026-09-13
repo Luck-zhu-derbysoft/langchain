@@ -5,6 +5,7 @@ import sys
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,8 @@ def create_app() -> FastAPI:
             priority=95,
         )
     )
+    checkpoint_stack = AsyncExitStack()
+    app.state.checkpoint_stack = checkpoint_stack
 
     a2a_protocol = A2AProtocol()
     orchestrator = MultiAgentOrchestrator(agent_registry, a2a_protocol)
@@ -216,6 +219,7 @@ def create_app() -> FastAPI:
         "alert_manager": alert_manager,
         "metrics_collector": metrics_collector,
         "audit_logger": audit_logger,
+        "fault_checkpointer": None,
     }
 
     # 静态文件和首页
@@ -232,10 +236,25 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def startup_checks() -> None:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         from redis import asyncio as redis_asyncio
 
         from app.infrastructure.mcp.mcp_client import async_init_mcp
         from app.infrastructure.queue.dlq_handler import dead_letter_queue
+
+        if not settings.langgraph_checkpoint_dsn.strip():
+            raise ValueError("LANGGRAPH_CHECKPOINT_DSN is empty.")
+        try:
+            fault_checkpoint = await checkpoint_stack.enter_async_context(
+                AsyncPostgresSaver.from_conn_string(
+                    settings.langgraph_checkpoint_dsn,
+                )
+            )
+            await fault_checkpoint.setup()
+        except Exception as e:
+            await checkpoint_stack.aclose()
+            raise RuntimeError("Failed to initialize checkpoint stack") from e
+        app.state.shared_dependencies["fault_checkpointer"] = fault_checkpoint
 
         await memory.awarmup()  # 异步预热 Redis/PostgreSQL 连接池
         await dead_letter_queue.startup()  # 异步初始化 DLQ，从 Redis 回捞历史数据
@@ -318,51 +337,59 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown_resources() -> None:
         logger.info("Application shutdown started")
-        # 1) 排空在途请求：等全局闸门完全空闲（或超时），期间停止接收新请求
-        if not await _drain_inflight(request_semaphore, settings.graceful_shutdown_timeout_seconds):
-            logger.warning("Not all in-flight requests completed before shutdown timeout")
-        # 2) 关闭各类资源
-        audit_logger.flush_to_file()  # 确保审计日志落盘
-
-        dependencies = app.state.shared_dependencies
         try:
-            from app.infrastructure.queue.dlq_handler import dead_letter_queue
+            # 1) 排空在途请求：等全局闸门完全空闲（或超时），期间停止接收新请求
+            if not await _drain_inflight(
+                request_semaphore, settings.graceful_shutdown_timeout_seconds
+            ):
+                logger.warning("Not all in-flight requests completed before shutdown timeout")
+            # 2) 关闭各类资源
+            audit_logger.flush_to_file()  # 确保审计日志落盘
 
-            await asyncio.wait_for(
-                dead_letter_queue.close(),
-                timeout=settings.graceful_shutdown_timeout_seconds,
-            )
-        except TimeoutError:
-            logger.error("DLQ worker did not stop within shutdown timeout")
-        alert_manager_instance = dependencies.get("alert_manager")
-        close_alert_manager = getattr(alert_manager_instance, "close", None)
-        if close_alert_manager is not None:
-            close_alert_manager(timeout=settings.graceful_shutdown_timeout_seconds)
-        memory_store = dependencies.get("memory")
-        if memory_store is not None:
-            close_memory = getattr(memory_store, "aclose", None)
-            if close_memory is not None:
-                await close_memory()
-            else:
-                memory_store.close()
-        model_client = dependencies.get("model_client")
-        close_model = getattr(model_client, "aclose", None)
-        if close_model is not None:
-            await close_model()
-        from app.infrastructure.mcp.mcp_client import async_close_mcp
-
-        await async_close_mcp()
-
-        # 关闭 Redis Stream worker
-        stream_worker = getattr(app.state, "stream_worker", None)
-        if stream_worker is not None:
+            dependencies = app.state.shared_dependencies
             try:
+                from app.infrastructure.queue.dlq_handler import dead_letter_queue
+
                 await asyncio.wait_for(
-                    stream_worker.close(),
+                    dead_letter_queue.close(),
                     timeout=settings.graceful_shutdown_timeout_seconds,
                 )
             except TimeoutError:
-                logger.error("Stream worker did not stop within shutdown timeout")
+                logger.error("DLQ worker did not stop within shutdown timeout")
+            alert_manager_instance = dependencies.get("alert_manager")
+            close_alert_manager = getattr(alert_manager_instance, "close", None)
+            if close_alert_manager is not None:
+                close_alert_manager(timeout=settings.graceful_shutdown_timeout_seconds)
+            memory_store = dependencies.get("memory")
+            if memory_store is not None:
+                close_memory = getattr(memory_store, "aclose", None)
+                if close_memory is not None:
+                    await close_memory()
+                else:
+                    memory_store.close()
+            model_client = dependencies.get("model_client")
+            close_model = getattr(model_client, "aclose", None)
+            if close_model is not None:
+                await close_model()
+            from app.infrastructure.mcp.mcp_client import async_close_mcp
+
+            await async_close_mcp()
+
+            # 关闭 Redis Stream worker
+            stream_worker = getattr(app.state, "stream_worker", None)
+            if stream_worker is not None:
+                try:
+                    await asyncio.wait_for(
+                        stream_worker.close(),
+                        timeout=settings.graceful_shutdown_timeout_seconds,
+                    )
+                except TimeoutError:
+                    logger.error("Stream worker did not stop within shutdown timeout")
+        finally:
+            try:
+                await checkpoint_stack.aclose()
+            finally:
+                app.state.shared_dependencies["fault_checkpointer"] = None
 
         logger.info("Application shutdown completed")
 

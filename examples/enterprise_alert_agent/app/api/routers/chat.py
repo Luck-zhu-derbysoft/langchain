@@ -29,6 +29,7 @@ def _get_chat_service(request: Request) -> ChatService:
         _metrics_collector=deps["metrics_collector"],
         agent_registry=deps["agent_registry"],
         orchestrator=deps["orchestrator"],
+        fault_checkpointer=deps["fault_checkpointer"],
     )
 
 
