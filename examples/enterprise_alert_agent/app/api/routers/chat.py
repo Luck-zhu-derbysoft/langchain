@@ -149,16 +149,23 @@ async def submit_intervention(
         "elapsed_time_ms": 1234
     }
     """
-    result = service._intervention_handler.submit_intervention(
-        task_id=intervention.task_id, request=intervention, execute_callback=None
-    )
-    return {
-        "intervention_id": result.intervention_id,
-        "success": result.success,
-        "output": result.output,
-        "error_message": result.error_message,
-        "elapsed_time_ms": result.elapsed_time_ms,
-    }
+    # result = service._intervention_handler.submit_intervention(
+    #     task_id=intervention.task_id, request=intervention, execute_callback=None
+    # )
+    try:
+        return await service.aresume_task(
+            request_id=request_id,
+            task_id=intervention.task_id,
+            decision=intervention.intervention_type,
+            tenant_id=_auth.tenant_id,
+            user_id=_auth.sub,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
 
 
 @router.get("/{request_id}/intervention-history")

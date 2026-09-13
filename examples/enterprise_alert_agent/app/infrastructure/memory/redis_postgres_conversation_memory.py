@@ -445,3 +445,23 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 exiting.retry_count = retry_count
                 exiting.updated_at = now
                 exiting.version += 1
+                return
+
+    async def aget_task_state(
+        self,
+        *,
+        request_id: str,
+        task_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> AgentTaskState | None:
+        async with self._apg_session() as session:
+            result = await session.execute(
+                select(AgentTaskState).where(
+                    AgentTaskState.request_id == request_id,
+                    AgentTaskState.task_id == task_id,
+                    AgentTaskState.tenant_id == tenant_id,
+                    AgentTaskState.user_id == user_id,
+                )
+            )
+            return result.scalar_one_or_none()

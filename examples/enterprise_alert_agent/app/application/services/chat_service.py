@@ -1650,3 +1650,67 @@ class ChatService:
             settings.context_tool_result_token_budget,
             keep="head",
         )
+
+    async def aresume_task(
+        self,
+        *,
+        request_id: str,
+        task_id: str,
+        decision: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """恢复处于 L4 人工干预状态的任务。"""
+        # 仅允许 "skip" 和 "abort" 决策 retry 为什么暂不支持
+        if decision not in {"skip", "abort"}:
+            raise ValueError(f"Invalid decision: {decision}")
+        if self.fault_checkpointer is None:
+            raise RuntimeError("Fault checkpointer is not initialized.")
+        task = await self.memory.aget_task_state(
+            request_id=request_id,
+            task_id=task_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        if task is None:
+            raise ValueError(f"Task not found: request_id={request_id}, task_id={task_id}")
+        if task.status != TaskStatus.WAITING_HUMAN.value:
+            raise ValueError(
+                f"Task is not in waiting human state: request_id={request_id}, task_id={task_id}"
+            )
+        workflow = FaultRecoveryWorkflow(
+            analyzer=self.fault_checkpointer,
+            executor=FaultExecutor(),
+            max_retry_attempts=self.config_manager.get_task_max_retries(),
+            checkpointer=self.fault_checkpointer,
+        )
+        outcome = await workflow.run(
+            ctx=None,
+            thread_id=f"{request_id}_{task_id}",
+            resume=decision,
+        )
+        task_status = TaskStatus.SKIPPED if decision == "skip" else TaskStatus.FAILED
+        scope = MemoryScope(
+            tenant_id=task.tenant_id,
+            user_id=task.user_id,
+            thread_id=task.thread_id,
+        )
+        await self.memory.aupsert_task_state(
+            request_id=request_id,
+            task_id=task_id,
+            scope=scope,
+            description=task.description,
+            status=task_status,
+            assigned_agent_id=task.assigned_agent_id,
+            depends_on=task.depends_on,
+            result=outcome.output,
+            error_message="" if decision == "skip" else outcome.output,
+            retry_count=outcome.attempts,
+        )
+        return {
+            "request_id": request_id,
+            "task_id": task_id,
+            "status": task_status.value,
+            "output": outcome.output,
+            "trail": outcome.trail,
+        }

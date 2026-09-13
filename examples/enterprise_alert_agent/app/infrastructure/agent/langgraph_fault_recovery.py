@@ -406,7 +406,7 @@ class FaultRecoveryWorkflow:
 
     async def run(
         self,
-        ctx: FaultContext,
+        ctx: FaultContext | None,
         *,
         thread_id: str = "default",
         resume: str | None = None,
@@ -424,6 +424,8 @@ class FaultRecoveryWorkflow:
             "recursion_limit": recursion_limit,
         }
         if resume is None:
+            if ctx is None:
+                raise ValueError("ctx must be provided when starting a new recovery process")
             await graph.ainvoke(self._initial_state(ctx), config)
         else:
             await graph.ainvoke(Command(resume=resume), config)
