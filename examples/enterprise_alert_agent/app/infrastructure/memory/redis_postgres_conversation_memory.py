@@ -440,6 +440,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 existing.description = description
                 existing.status = status.value
                 existing.assigned_agent_id = assigned_agent_id
+                existing.depends_on = depends_on or existing.depends_on
                 existing.result = result
                 existing.error_message = error_message
                 existing.retry_count = retry_count

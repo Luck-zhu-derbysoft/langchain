@@ -35,12 +35,15 @@ from app.infrastructure.audit.audit_logger import audit_logger
 from app.infrastructure.embedding.embedding_client import EmbeddingClient
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.llm.model_client import ModelAuthError, ModelClient, ModelRequestError
+from app.infrastructure.memory.models import TaskStatus
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
+    MemoryScope,
     RedisPostgresConversationMemoryStore,
 )
 from app.infrastructure.queue.redis_stream import RedisStreamWorker
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.observability.alert_manager import alert_manager
+from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.observability.langsmith_tracer import LangSmithTracer
 from app.observability.logging_config import configure_logging, request_id_context
 from app.observability.metrics import MetricsCollector
@@ -68,7 +71,6 @@ def get_user_rate_limit_key(request) -> str:
     return f"ip:{get_remote_address(request)}"
 
 
-limiter = Limiter(key_func=get_user_rate_limit_key)
 request_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
 
 logger = logging.getLogger(__name__)
@@ -257,6 +259,48 @@ def create_app() -> FastAPI:
         app.state.shared_dependencies["fault_checkpointer"] = fault_checkpoint
 
         await memory.awarmup()  # 异步预热 Redis/PostgreSQL 连接池
+        try:
+            incomplete_tasks = await memory.alist_incomplete_task_states()
+            logger.info("Incomplete tasks at startup: %s", incomplete_tasks)
+            if incomplete_tasks:
+                logger.warning("There are incomplete tasks at startup.")
+                for task in incomplete_tasks:
+                    logger.warning("Incomplete task: %s", task)
+                    if task.status in (TaskStatus.QUEUED.value, TaskStatus.RUNNING.value):
+                        scope = MemoryScope(
+                            tenant_id=task.tenant_id,
+                            user_id=task.user_id,
+                            thread_id=task.thread_id,
+                        )
+                        await memory.aupsert_task_state(
+                            request_id=task.request_id,
+                            task_id=task.task_id,
+                            scope=scope,
+                            description=task.description,
+                            status=TaskStatus.WAITING_HUMAN,
+                            assigned_agent_id=task.assigned_agent_id,
+                            depends_on=task.depends_on,
+                            result=task.result,
+                            error_message=task.error_message,
+                            retry_count=task.retry_count,
+                        )
+                        alert_manager.create_alert(
+                            alert_type=AlertTypes.FAULT_ALERT,
+                            severity=AlertSeverity.CRITICAL,
+                            title=f"中断任务已转换为等待人工干预 ({task.task_id})",
+                            message=f"请求 {task.request_id} 中的任务 {task.task_id} 因服务重启中断，状态已更新为等待人工处理",
+                            affected_resource=task.task_id,
+                            context={
+                                "tenant_id": task.tenant_id,
+                                "user_id": task.user_id,
+                                "thread_id": task.thread_id,
+                                "previous_status": task.status,
+                            },
+                        )
+        except Exception as e:
+            logger.error("Startup checks failed: %s", e)
+            raise
+
         await dead_letter_queue.startup()  # 异步初始化 DLQ，从 Redis 回捞历史数据
 
         # 初始化 Redis Stream worker

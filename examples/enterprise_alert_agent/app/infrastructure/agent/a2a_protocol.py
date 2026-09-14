@@ -275,7 +275,7 @@ class ManualInterventionRequest:
 
     task_id: str  # 目标任务ID
     intervention_type: Literal["skip", "abort"]  # "retry", "skip", "modify_params", "abort"
-    retry_params: dict = field(default_factory=dict)  # 用于 modify_params
+    retry_params: dict = field(default_factory=dict)  # 预留字段，当前恢复接口暂不使用
     skip_reason: str = ""  # 跳过理由
     user_id: str = ""  # 执行干预的用户ID
     timestamp: datetime = field(default_factory=datetime.utcnow)
