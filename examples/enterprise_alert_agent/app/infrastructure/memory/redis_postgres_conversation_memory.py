@@ -409,7 +409,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         retry_count: int = 0,
     ) -> None:
         async with self._apg_session() as session:
-            exiting = await session.get(
+            existing = await session.get(
                 AgentTaskState,
                 {
                     "request_id": request_id,
@@ -417,7 +417,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 },
             )
             now = datetime.now(UTC)
-            if exiting is None:
+            if existing is None:
                 task_state = AgentTaskState(
                     request_id=request_id,
                     task_id=task_id,
@@ -437,14 +437,14 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 session.add(task_state)
                 return
             else:
-                exiting.description = description
-                exiting.status = status.value
-                exiting.assigned_agent_id = assigned_agent_id
-                exiting.result = result
-                exiting.error_message = error_message
-                exiting.retry_count = retry_count
-                exiting.updated_at = now
-                exiting.version += 1
+                existing.description = description
+                existing.status = status.value
+                existing.assigned_agent_id = assigned_agent_id
+                existing.result = result
+                existing.error_message = error_message
+                existing.retry_count = retry_count
+                existing.updated_at = now
+                existing.version += 1
                 return
 
     async def aget_task_state(
@@ -465,3 +465,20 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 )
             )
             return result.scalar_one_or_none()
+
+    async def alist_incomplete_task_states(self) -> list[AgentTaskState]:
+        async with self._apg_session() as session:
+            result = await session.execute(
+                select(AgentTaskState)
+                .where(
+                    AgentTaskState.status.in_(
+                        [
+                            TaskStatus.QUEUED.value,
+                            TaskStatus.RUNNING.value,
+                            TaskStatus.WAITING_HUMAN.value,
+                        ]
+                    )
+                )
+                .order_by(AgentTaskState.created_at)
+            )
+            return list(result.scalars().all())

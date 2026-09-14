@@ -136,8 +136,7 @@ async def submit_intervention(
     Body:
     {
         "task_id": "task_1",
-        "intervention_type": "retry" | "skip" | "modify_params" | "abort",
-        "retry_params": {"query": "modified query"},  // 仅 modify_params 需要
+        "intervention_type": "skip" | "abort" ,
         "skip_reason": "用户决定跳过"  // 仅 skip 需要
     }
 

@@ -98,3 +98,5 @@ CREATE TABLE IF NOT EXISTS agent_task_state (
 
 CREATE INDEX IF NOT EXISTS idx_task_state_request
     ON agent_task_state (request_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_state_recovery
+    ON agent_task_state (status, updated_at);

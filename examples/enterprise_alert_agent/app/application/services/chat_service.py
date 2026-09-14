@@ -1673,13 +1673,13 @@ class ChatService:
             user_id=user_id,
         )
         if task is None:
-            raise ValueError(f"Task not found: request_id={request_id}, task_id={task_id}")
+            raise LookupError(f"Task not found: request_id={request_id}, task_id={task_id}")
         if task.status != TaskStatus.WAITING_HUMAN.value:
             raise ValueError(
                 f"Task is not in waiting human state: request_id={request_id}, task_id={task_id}"
             )
         workflow = FaultRecoveryWorkflow(
-            analyzer=self.fault_checkpointer,
+            analyzer=self.fault_analyzer,
             executor=FaultExecutor(),
             max_retry_attempts=self.config_manager.get_task_max_retries(),
             checkpointer=self.fault_checkpointer,

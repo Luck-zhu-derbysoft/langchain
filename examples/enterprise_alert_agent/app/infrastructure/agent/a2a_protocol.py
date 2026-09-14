@@ -6,7 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from app.infrastructure.memory.models import TaskStatus
 
@@ -196,7 +196,7 @@ class SubTask:
     priority: int = 0
     """分配的智能体 ID"""
     assigned_agent_id: str = ""
-    status: TaskStatus = TaskStatus.PENDING
+    status: TaskStatus = TaskStatus.QUEUED
     """子任务状态"""
 
 
@@ -274,7 +274,7 @@ class ManualInterventionRequest:
     """人工干预请求"""
 
     task_id: str  # 目标任务ID
-    intervention_type: str  # "retry", "skip", "modify_params", "abort"
+    intervention_type: Literal["skip", "abort"]  # "retry", "skip", "modify_params", "abort"
     retry_params: dict = field(default_factory=dict)  # 用于 modify_params
     skip_reason: str = ""  # 跳过理由
     user_id: str = ""  # 执行干预的用户ID
