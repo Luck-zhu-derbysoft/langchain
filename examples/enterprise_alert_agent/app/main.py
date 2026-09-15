@@ -20,6 +20,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from app.application.services.chat_service import ChatService
 from app.application.services.ingest_service import IngestService
 from app.config.settings import settings
 from app.config.tracing_config import (
@@ -260,13 +261,33 @@ def create_app() -> FastAPI:
 
         await memory.awarmup()  # 异步预热 Redis/PostgreSQL 连接池
         try:
-            incomplete_tasks = await memory.alist_incomplete_task_states()
-            logger.info("Incomplete tasks at startup: %s", incomplete_tasks)
-            if incomplete_tasks:
-                logger.warning("There are incomplete tasks at startup.")
-                for task in incomplete_tasks:
-                    logger.warning("Incomplete task: %s", task)
-                    if task.status in (TaskStatus.QUEUED.value, TaskStatus.RUNNING.value):
+            replay_owner = f"startup:{uuid.uuid4()}"
+            replayable_tasks = await memory.aclaim_replayable_task_states(owner=replay_owner)
+            logger.info("Replayable tasks at startup: %s", replayable_tasks)
+            if replayable_tasks:
+                logger.warning("There are replayable tasks at startup.")
+                replay_service = ChatService(
+                    model_client=model_client,
+                    retriever=retriever,
+                    trace=trace,
+                    memory=memory,
+                    _intervention_handler=intervention_handler,
+                    _alert_manager=alert_manager,
+                    _metrics_collector=metrics_collector,
+                    agent_registry=agent_registry,
+                    orchestrator=orchestrator,
+                    fault_checkpointer=fault_checkpoint,
+                )
+                for task in replayable_tasks:
+                    try:
+                        logger.warning("Replaying task: %s", task)
+                        await replay_service.areplay_task_from_snapshot(task)
+                    except Exception:
+                        logger.exception(
+                            "Task replay failed: request_id=%s task_id=%s",
+                            task.request_id,
+                            task.task_id,
+                        )
                         scope = MemoryScope(
                             tenant_id=task.tenant_id,
                             user_id=task.user_id,
@@ -283,6 +304,7 @@ def create_app() -> FastAPI:
                             result=task.result,
                             error_message=task.error_message,
                             retry_count=task.retry_count,
+                            replayable=False,
                         )
                         alert_manager.create_alert(
                             alert_type=AlertTypes.FAULT_ALERT,
@@ -297,6 +319,7 @@ def create_app() -> FastAPI:
                                 "previous_status": task.status,
                             },
                         )
+
         except Exception as e:
             logger.error("Startup checks failed: %s", e)
             raise

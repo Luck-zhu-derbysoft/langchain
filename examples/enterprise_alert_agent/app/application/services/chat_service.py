@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Generator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from threading import Lock
 from typing import Any, TypedDict, cast
 
@@ -49,6 +49,7 @@ from app.infrastructure.llm.model_client import (
     ModelRequestError,
 )
 from app.infrastructure.mcp.mcp_client import get_tools_metadata
+from app.infrastructure.memory.models import AgentTaskState
 from app.infrastructure.memory.redis_postgres_conversation_memory import (
     MemoryScope,
     RedisPostgresConversationMemoryStore,
@@ -1115,6 +1116,29 @@ class ChatService:
             strategy="parallel_first" if not has_sequential_dependency else "dependency_aware",
         )
 
+    @staticmethod
+    def _task_idempotency_key(request_id: str, task_id: str) -> str:
+        return f"{request_id}:{task_id}"
+
+    @staticmethod
+    def _build_task_execution_snapshot(
+        *,
+        req_query: str,
+        subtask: SubTask,
+        system_prompt: str,
+        available_tools: list[dict[str, Any]],
+        tool_selection: ToolSelection | None = None,
+    ) -> dict[str, Any]:
+        subtask_snapshot = asdict(subtask)
+        subtask_snapshot["status"] = subtask.status.value
+        return {
+            "request_query": req_query,
+            "subtask": subtask_snapshot,
+            "system_prompt": system_prompt,
+            "available_tools": available_tools,
+            "tool_selection": asdict(tool_selection) if tool_selection is not None else None,
+        }
+
     async def _aexecute_decomposed_tasks(
         self,
         req_query: str,
@@ -1144,6 +1168,13 @@ class ChatService:
             task_started = time.perf_counter()
             selected_agent = self.orchestrator.select_agent_by_subtask(subtask)
             subtask.assigned_agent_id = selected_agent.agent_id
+            execution_snapshot = self._build_task_execution_snapshot(
+                req_query=req_query,
+                subtask=subtask,
+                system_prompt=system_prompt,
+                available_tools=available_tools,
+                tool_selection=tool_selection,
+            )
             await self.memory.aupsert_task_state(
                 request_id=request_id,
                 task_id=subtask.task_id,
@@ -1152,6 +1183,10 @@ class ChatService:
                 status=TaskStatus.RUNNING,
                 depends_on=subtask.depends_on,
                 assigned_agent_id=subtask.assigned_agent_id,
+                execution_snapshot=execution_snapshot,
+                replayable=True,
+                idempotency_key=self._task_idempotency_key(request_id, subtask.task_id),
+                max_replay_count=1,
             )
             if state is not None:
                 with assigned_agent_lock:
@@ -1295,6 +1330,7 @@ class ChatService:
                     depends_on=subtask.depends_on,
                     error_message=str(root_cause),
                     retry_count=outcome.attempts,
+                    replayable=False,
                 )
                 return (
                     subtask.task_id,
@@ -1318,6 +1354,13 @@ class ChatService:
 
         task_status_map = {subtask.task_id: "queued" for subtask in decomposition.subtasks}
         for subtask in decomposition.subtasks:
+            execution_snapshot = self._build_task_execution_snapshot(
+                req_query=req_query,
+                subtask=subtask,
+                system_prompt=system_prompt,
+                available_tools=available_tools,
+                tool_selection=tool_selection,
+            )
             await self.memory.aupsert_task_state(
                 request_id=request_id,
                 task_id=subtask.task_id,
@@ -1325,6 +1368,10 @@ class ChatService:
                 description=subtask.description,
                 status=TaskStatus.QUEUED,
                 depends_on=subtask.depends_on,
+                replayable=True,
+                idempotency_key=self._task_idempotency_key(request_id, subtask.task_id),
+                execution_snapshot=execution_snapshot,
+                max_replay_count=1,
             )
         batches: list[list[SubTask]] = self._build_dependency_batches(decomposition)
 
@@ -1352,6 +1399,7 @@ class ChatService:
                         error_message="Skipped due to failed dependencies",
                         retry_count=0,
                         depends_on=subtask.depends_on,
+                        replayable=False,
                     )
                     continue
                 runnable_subtasks.append(subtask)
@@ -1392,6 +1440,7 @@ class ChatService:
                     result=out if success else "",
                     error_message="" if success else out,
                     retry_count=retry_times,
+                    replayable=False,
                 )
 
                 if success:
@@ -1651,6 +1700,67 @@ class ChatService:
             keep="head",
         )
 
+    async def areplay_task_from_snapshot(self, task: AgentTaskState) -> dict[str, Any]:
+        """从任务快照中重放任务。"""
+        snapshot = task.execution_snapshot or {}
+        subtask_data = snapshot.get("subtask") or {}
+        if not subtask_data:
+            raise ValueError("No subtask snapshot data available.")
+        subtask = SubTask(
+            task_id=str(subtask_data["task_id"]),
+            description=str(subtask_data["description"]),
+            preferred_tool=str(subtask_data.get("preferred_tool", "")),
+            depends_on=list(subtask_data.get("depends_on", [])),
+            priority=int(subtask_data.get("priority", 0)),
+            assigned_agent_id=str(subtask_data.get("assigned_agent_id", "")),
+        )
+        scope = MemoryScope(
+            tenant_id=task.tenant_id,
+            user_id=task.user_id,
+            thread_id=task.thread_id,
+        )
+        tools_resolution = await self._aresolve_tools({"rag": True, "mcp": True})
+        available_tools = list(snapshot.get("available_tools") or tools_resolution["available"])
+        skill_map = tools_resolution["skill_map"]
+        mcp_tool_map = tools_resolution["mcp_map"]
+        state = AgentState()
+        tool_selection_data = snapshot.get("tool_selection") or {}
+        tool_selection: ToolSelection | None = None
+        if tool_selection_data:
+            tool_selection = ToolSelection(
+                tool_name=str(tool_selection_data.get("tool_name", "")),
+                confidence=float(tool_selection_data.get("confidence", 0.0)),
+                fallback_tools=list(tool_selection_data.get("fallback_tools", [])),
+                reasoning=str(tool_selection_data.get("reasoning", "")),
+                agent_id=str(tool_selection_data.get("agent_id", "")),
+            )
+
+        result = await self._aexecute_decomposed_tasks(
+            req_query=str(snapshot.get("request_query")),
+            request_id=task.request_id,
+            decomposition=TaskDecomposition(
+                subtasks=[subtask],
+                parallel_groups=[[subtask.task_id]],
+                dependencies={subtask.task_id: subtask.depends_on},
+                strategy="replay_single",
+            ),
+            system_prompt=str(snapshot.get("system_prompt") or ""),
+            available_tools=available_tools,
+            skill_map=skill_map,
+            mcp_tool_map=mcp_tool_map,
+            history_scope=scope,
+            tool_selection=tool_selection,
+            state=state,
+        )
+        return {
+            "request_id": task.request_id,
+            "task_id": task.task_id,
+            "status": result.task_status_mapping.get(task.task_id, ""),
+            "success": task.task_id in result.task_outputs,
+            "output": result.task_outputs.get(task.task_id, ""),
+            "failed_task_ids": result.failed_task_ids,
+        }
+
     async def aresume_task(
         self,
         *,
@@ -1706,6 +1816,7 @@ class ChatService:
             result=outcome.output,
             error_message="" if decision == "skip" else outcome.output,
             retry_count=outcome.attempts,
+            replayable=False,
         )
         return {
             "request_id": request_id,

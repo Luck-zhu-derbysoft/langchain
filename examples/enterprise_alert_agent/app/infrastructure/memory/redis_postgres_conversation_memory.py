@@ -407,6 +407,10 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         result: str = "",
         error_message: str = "",
         retry_count: int = 0,
+        replayable: bool = False,
+        idempotency_key: str = "",
+        execution_snapshot: dict[str, Any] | None = None,
+        max_replay_count: int = 1,
     ) -> None:
         async with self._apg_session() as session:
             existing = await session.get(
@@ -431,6 +435,10 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                     result=result,
                     error_message=error_message,
                     retry_count=retry_count,
+                    replayable=replayable,
+                    idempotency_key=idempotency_key,
+                    execution_snapshot=execution_snapshot or {},
+                    max_replay_count=max_replay_count,
                     created_at=now,
                     updated_at=now,
                 )
@@ -444,6 +452,10 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 existing.result = result
                 existing.error_message = error_message
                 existing.retry_count = retry_count
+                existing.replayable = replayable
+                existing.idempotency_key = idempotency_key or existing.idempotency_key
+                existing.execution_snapshot = execution_snapshot or existing.execution_snapshot
+                existing.max_replay_count = max_replay_count
                 existing.updated_at = now
                 existing.version += 1
                 return
@@ -483,3 +495,46 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 .order_by(AgentTaskState.created_at)
             )
             return list(result.scalars().all())
+
+    async def aclaim_replayable_task_states(
+        self,
+        *,
+        owner: str,
+        limit: int = 20,
+        lease_seconds: int = 300,
+    ) -> list[AgentTaskState]:
+        now = datetime.now(UTC)
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        async with self._apg_session() as session:
+            result = await session.execute(
+                select(AgentTaskState)
+                .where(
+                    AgentTaskState.replayable.is_(True),
+                    AgentTaskState.status.in_(
+                        [
+                            TaskStatus.QUEUED.value,
+                            TaskStatus.RUNNING.value,
+                        ]
+                    ),
+                    AgentTaskState.replay_count < AgentTaskState.max_replay_count,
+                    or_(
+                        AgentTaskState.lease_expires_at.is_(None),
+                        AgentTaskState.lease_expires_at < now,
+                    ),
+                )
+                .order_by(AgentTaskState.created_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            claimed: list[AgentTaskState] = []
+            for task_state in result.scalars().all():
+                if not task_state.execution_snapshot:
+                    continue
+                task_state.lease_owner = owner
+                task_state.lease_expires_at = lease_expires_at
+                task_state.replay_count += 1
+                task_state.status = TaskStatus.QUEUED.value
+                task_state.updated_at = now
+                task_state.version += 1
+                claimed.append(task_state)
+            return claimed

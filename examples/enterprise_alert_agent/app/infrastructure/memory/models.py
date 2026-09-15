@@ -63,6 +63,8 @@ class AgentTaskState(SQLModel, table=True):
     __table_args__ = (
         Index("idx_task_state_request", "request_id", "created_at"),
         Index("idx_task_state_recovery", "status", "updated_at"),
+        Index("idx_task_state_replay", "replayable", "status", "lease_expires_at"),
+        Index("idx_task_state_idempotency", "idempotency_key"),
     )
 
     request_id: str = Field(primary_key=True, max_length=128)
@@ -77,6 +79,16 @@ class AgentTaskState(SQLModel, table=True):
     result: str = Field(default="")
     error_message: str = Field(default="")
     retry_count: int = Field(default=0)
+    replay_count: int = Field(default=0)
+    max_replay_count: int = Field(default=1)
+    replayable: bool = Field(default=False)
+    idempotency_key: str = Field(default="", max_length=256)
+    execution_snapshot: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False),
+    )
+    lease_owner: str = Field(default="", max_length=128)
+    lease_expires_at: datetime | None = Field(default=None)
     version: int = Field(default=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

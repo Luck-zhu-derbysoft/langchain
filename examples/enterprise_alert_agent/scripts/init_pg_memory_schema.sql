@@ -87,10 +87,17 @@ CREATE TABLE IF NOT EXISTS agent_task_state (
     description       TEXT NOT NULL,
     assigned_agent_id VARCHAR(128) NOT NULL DEFAULT '',
     depends_on        JSONB NOT NULL DEFAULT '[]'::jsonb,
-    result            TEXT NOT NULL DEFAULT '',
-    error_message     TEXT NOT NULL DEFAULT '',
-    retry_count       INTEGER NOT NULL DEFAULT 0,
-    version           INTEGER NOT NULL DEFAULT 0,
+        result             TEXT NOT NULL DEFAULT '',
+    error_message      TEXT NOT NULL DEFAULT '',
+    retry_count        INTEGER NOT NULL DEFAULT 0,
+    replay_count       INTEGER NOT NULL DEFAULT 0,
+    max_replay_count   INTEGER NOT NULL DEFAULT 1,
+    replayable         BOOLEAN NOT NULL DEFAULT FALSE,
+    idempotency_key    VARCHAR(256) NOT NULL DEFAULT '',
+    execution_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    lease_owner        VARCHAR(128) NOT NULL DEFAULT '',
+    lease_expires_at   TIMESTAMPTZ,
+    version            INTEGER NOT NULL DEFAULT 0,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (request_id, task_id)
@@ -100,3 +107,8 @@ CREATE INDEX IF NOT EXISTS idx_task_state_request
     ON agent_task_state (request_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_state_recovery
     ON agent_task_state (status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_task_state_replay
+    ON agent_task_state (replayable, status, lease_expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_task_state_idempotency
+    ON agent_task_state (idempotency_key);
