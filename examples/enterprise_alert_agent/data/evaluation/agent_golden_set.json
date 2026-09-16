@@ -1,0 +1,29 @@
+[
+  {
+    "id": "alert-escalation-001",
+    "query": "连续失败几次需要升级到二线？",
+    "business_context": "",
+    "expected_answer": "连续 3 次失败后必须升级到二线。",
+    "expected_sources": ["eval-doc-001"],
+    "expected_tool": "rag",
+    "criteria": [
+      "回答必须包含连续 3 次失败",
+      "回答必须说明需要升级到二线",
+      "回答应引用知识库内容",
+      "不得编造未提供的升级规则"
+    ]
+  },
+  {
+    "id": "time-query-001",
+    "query": "今天是什么日子？",
+    "business_context": "",
+    "expected_answer": "返回当前日期。",
+    "expected_sources": [],
+    "expected_tool": "time",
+    "criteria": [
+      "回答必须给出当前日期",
+      "不得调用知识库回答",
+      "回答应简洁"
+    ]
+  }
+]

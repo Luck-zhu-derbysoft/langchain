@@ -1,0 +1,136 @@
+name: Enterprise Agent Evaluation
+
+on:
+  pull_request:
+    paths:
+      - "examples/enterprise_alert_agent/app/**"
+      - "examples/enterprise_alert_agent/data/evaluation/**"
+      - "examples/enterprise_alert_agent/scripts/evaluate_agent.py"
+      - "examples/enterprise_alert_agent/tests/unit/test_agent_evaluation.py"
+      - "examples/enterprise_alert_agent/docker-compose.yml"
+      - "examples/enterprise_alert_agent/Dockerfile"
+      - ".github/workflows/enterprise_agent_evaluation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enterprise-agent-evaluation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WORKDIR: examples/enterprise_alert_agent
+  AGENT_URL: http://127.0.0.1:8000
+  JUDGE_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+
+jobs:
+  evaluate:
+    name: LLM-as-judge evaluation
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      JUDGE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+      EVAL_AUTH_API_KEY: ci-evaluation-admin-key
+      ADMIN_JWT_SECRET: ci-evaluation-admin-secret-32-characters
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Python and uv
+        uses: ./.github/actions/uv_setup
+        with:
+          python-version: "3.11"
+          cache-suffix: enterprise-agent-evaluation
+          working-directory: ${{ env.WORKDIR }}
+
+      - name: Install dependencies
+        working-directory: ${{ env.WORKDIR }}
+        run: uv sync --extra dev --frozen
+
+      - name: Write CI environment
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          printf '%s\n' \
+            'APP_ENV=test' \
+            'LOG_LEVEL=INFO' \
+            "DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}" \
+            "BASE_URL=${JUDGE_BASE_URL}" \
+            'MODEL_NAME=qwen-plus' \
+            'FALLBACK_MODEL_NAME=qwen-turbo' \
+            'MYSQL_HOST=127.0.0.1' \
+            'MYSQL_PASSWORD=ci-mysql-password' \
+            'REDIS_HOST=redis' \
+            'REDIS_PORT=6379' \
+            'REDIS_PASSWORD=ci-redis-password' \
+            'PG_HOST=postgres' \
+            'PG_PORT=5432' \
+            'PG_DB=postgres' \
+            'PG_USER=postgres' \
+            'PG_PASSWORD=ci-postgres-password' \
+            'LANGGRAPH_CHECKPOINT_DSN=postgresql://postgres:ci-postgres-password@postgres:5432/postgres' \
+            'MCP_ENABLED=false' \
+            'MODEL_STARTUP_PROBE_ENABLED=false' \
+            'LANGSMITH_TRACING=false' \
+            "ADMIN_API_KEY=${EVAL_AUTH_API_KEY}" \
+            "ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET}" > .env
+
+      - name: Start Agent and dependencies
+        working-directory: ${{ env.WORKDIR }}
+        run: docker compose up -d --build
+
+      - name: Wait for Agent
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs app
+          exit 1
+
+      - name: Issue evaluation token
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          token_response=$(curl --fail --silent --show-error \
+            -X POST http://127.0.0.1:8000/admin/token \
+            -H 'Content-Type: application/json' \
+            -d '{"user_id":"ci-evaluator","role":"admin","api_key":"ci-evaluation-admin-key","tenant_id":"ci-tenant"}')
+          echo "AGENT_TOKEN=$(printf '%s' "$token_response" | jq -r '.token')" >> "$GITHUB_ENV"
+
+      - name: Seed Golden Set knowledge
+        run: |
+          curl --fail --silent --show-error \
+            -X POST http://127.0.0.1:8000/ingest/text \
+            -H "Authorization: Bearer ${AGENT_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d '{"content":"值班告警升级策略：连续3次失败后必须升级到二线。","source_id":"eval-doc-001","metadata":{"category":"eval"}}'
+
+      - name: Run LLM-as-judge evaluation
+        working-directory: ${{ env.WORKDIR }}
+        run: uv run python scripts/evaluate_agent.py
+
+      - name: Upload evaluation result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: enterprise-agent-evaluation-${{ github.run_id }}
+          path: ${{ env.WORKDIR }}/data/evaluation/latest_result.json
+          if-no-files-found: ignore
+
+      - name: Show Agent logs on failure
+        if: failure()
+        working-directory: ${{ env.WORKDIR }}
+        run: docker compose logs app
+
+      - name: Stop services
+        if: always()
+        working-directory: ${{ env.WORKDIR }}
+        run: docker compose down -v
