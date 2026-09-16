@@ -4,7 +4,7 @@
 > 详细参考：`LEARNING_ROADMAP.md`（完整版）｜`LEARNING_PLAN.md`（纯计划）。
 
 ## 一、技能清单（8 大块，共 36 项）
-一、技能清单| 消息队列（Stream/Celery/Kafka/RabbitMQ技能点，需要修改的内容。给出对比代码，方便我手动修复
+
 > 优先级：🔴 最缺最该先学 ｜ 🟠 重要 ｜ 🟡 已有、复盘提升 ｜ 🟢 加分
 
 ### 1. 异步与并发（岗位：核心1）
@@ -19,6 +19,8 @@
 | PG/Redis 连接池 / 索引 | ✅ 部分 | 复盘预热逻辑 | 🟡 |
 (已修复)| 消息队列（Stream/Celery/Kafka/RabbitMQ） | ❌ 仅 DLQ 无消费 | DLQ 消费 + Redis Stream | 🔴 |
 (已修复)| 幂等 / 热点数据 | ❌ 未做 | ingest 幂等键（SETNX） | 🔴 |
+
+一、技能清单| 3. Agent 核心技能中的Agent 评估（LLM-as-judge）技能点，需要修改的内容。给出对比代码，方便我手动修复
 
 ### 3. Agent 核心技能（岗位：优先1 + 加分1/2/3 + 职责①②③）
 (已修复)| Skills 技能生态（注册/注入） | ⚠️ 技能写死 | `static.py` 改注册表 | 🔴 |
