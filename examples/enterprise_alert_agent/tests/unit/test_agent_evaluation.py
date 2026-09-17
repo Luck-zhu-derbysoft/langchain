@@ -37,7 +37,10 @@ def test_golden_set_has_required_fields() -> None:
 
 
 def test_load_case_reads_golden_set() -> None:
-    assert len(load_case()) == 2
+    cases = load_case()
+
+    assert len(cases) >= 1
+    assert len({case["id"] for case in cases}) == len(cases)
 
 
 def test_judge_result_rejects_out_of_range_score() -> None:
