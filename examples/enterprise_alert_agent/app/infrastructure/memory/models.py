@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import JSON, Column, Index
+from sqlalchemy import JSON, Column, DateTime, Index
 from sqlmodel import Field, SQLModel
 
 
@@ -25,9 +25,18 @@ class ConversationMemorySession(SQLModel, table=True):
     turn_count: int = Field(default=0)
     status: str = Field(default="active", max_length=16)
     version: int = Field(default=0)
-    last_message_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    expires_at: datetime | None = Field(default=None)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_message_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    expires_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
 class ConversationMemoryTurn(SQLModel, table=True):
@@ -55,7 +64,10 @@ class ConversationMemoryTurn(SQLModel, table=True):
         sa_column=Column("metadata", JSON, nullable=False),
     )
     is_deleted: bool = Field(default=False)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
 class AgentTaskState(SQLModel, table=True):
@@ -88,7 +100,16 @@ class AgentTaskState(SQLModel, table=True):
         sa_column=Column(JSON, nullable=False),
     )
     lease_owner: str = Field(default="", max_length=128)
-    lease_expires_at: datetime | None = Field(default=None)
+    lease_expires_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     version: int = Field(default=0)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )

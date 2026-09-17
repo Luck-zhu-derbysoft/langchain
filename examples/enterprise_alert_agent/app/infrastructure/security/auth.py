@@ -49,7 +49,7 @@ def create_access_token(
     payload = {
         "sub": user_id,
         "role": role.value,
-        "exp": expire_at.timestamp(),
+        "exp": int(expire_at.timestamp()),
         "tenant_id": tenant_id,
     }
     token = jwt.encode(payload, settings.admin_jwt_secret, algorithm=settings.admin_jwt_algorithm)

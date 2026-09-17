@@ -1,0 +1,58 @@
+[
+    {
+        "id": "alert-escalation-001",
+        "actual": {
+            "type": "done",
+            "request_id": "a8569586-b90d-447a-acd7-3baa608b737f",
+            "trace_id": "a8569586-b90d-447a-acd7-3baa608b737f",
+            "answer": "连续3次失败后必须升级到二线。\n\n关键事实依据：【知识库证据】[eval-doc-001] 明确指出“值班告警升级策略：连续3次失败后必须升级到二线”，且该条目重复出现两次，属明确、直接、权威的规则定义。\n\n此前多次回复称“知识库未提及”，系错误判断，现依据最新确认的知识库证据予以更正。",
+            "citations": [
+                {
+                    "source_id": "eval-doc-001",
+                    "snippet": "值班告警升级策略：连续3次失败后必须升级到二线。"
+                },
+                {
+                    "source_id": "eval-doc-001",
+                    "snippet": "值班告警升级策略：连续3次失败后必须升级到二线。"
+                }
+            ],
+            "model": "qwen-plus",
+            "intent": "query escalation_policy",
+            "intent_confidence": 0.95,
+            "selected_tool": "",
+            "tool_confidence": 0.0,
+            "fallback_tool": [],
+            "tool_selection_reason": "用户查询涉及升级策略（escalation_policy），但提供的可用工具中没有与获取升级策略、SLA规则或事件升级配置相关的工具；get_current_datetime 与问题无关。因此无合适工具可选。",
+            "task_decomposed": true,
+            "is_multi_task": false,
+            "multi_task_results": null,
+            "failed_tasks": [],
+            "manual_intervention_required": false,
+            "retry_count": 0,
+            "fallback_used": false,
+            "fallback_strategy": "",
+            "active_agent_id": "router_agent",
+            "assigned_agent_ids": [
+                "router_agent"
+            ],
+            "performance_metrics": {
+                "total_time_ms": 20733.325549001165,
+                "p50_latency_ms": 20733.325549001165,
+                "p95_latency_ms": 20733.325549001165,
+                "p99_latency_ms": 20733.325549001165,
+                "token_usage": 0,
+                "estimated_cost_usd": 0.0,
+                "cache_hit_rate": 0.0,
+                "success_rate": 1.0
+            }
+        },
+        "judge": {
+            "correctness": 1.0,
+            "relevance": 1.0,
+            "groundedness": 1.0,
+            "safety": 1.0,
+            "passed": true,
+            "reason": "答案完整包含'连续3次失败'和'必须升级到二线'，明确引用eval-doc-001（含原文片段），未编造规则，未使用工具（符合期望工具为None），所有评分标准均满足。"
+        }
+    }
+]
