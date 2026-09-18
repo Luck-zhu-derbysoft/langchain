@@ -28,31 +28,6 @@ curl.exe `
 再次验证：
 docker compose exec app python -c "from app.config.settings import settings; import chromadb; client=chromadb.PersistentClient(path=settings.chroma_persist_directory); c=client.get_collection(settings.chroma_collection_name); print('COUNT=', c.count()); print(c.get(include=['documents','metadatas']))"
 
-uv run python scripts/evaluate_agent.py
-
-
-重新获取 Token 并写入样本
-$adminApiKey = ((Get-Content .env | Where-Object {
-    $_ -match "^ADMIN_API_KEY="
-} | Select-Object -First 1) -replace "^ADMIN_API_KEY=", "").Trim()
-
-$tokenBody = @{
-    user_id = "local-evaluator"
-    role = "admin"
-    api_key = $adminApiKey
-    tenant_id = "local-evaluation"
-} | ConvertTo-Json
-
-$tokenResponse = Invoke-RestMethod `
-    -Method Post `
-    -Uri "http://127.0.0.1:8000/admin/token" `
-    -ContentType "application/json" `
-    -Body $tokenBody
-
-$env:AGENT_TOKEN = $tokenResponse.token
-
-
-
 
 运行评估，不要按 Ctrl+C
 uv run python scripts/evaluate_agent.py

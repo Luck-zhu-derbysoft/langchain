@@ -157,7 +157,10 @@ class Retriever:
             merged.append(item)
         merged.sort(key=lambda d: d["score"], reverse=True)
         if settings.rerank_enabled:
-            merged = self._flashrank_rerank(query, merged)
+            try:
+                merged = self._flashrank_rerank(query, merged)
+            except Exception as e:
+                logger.warning("flashrank rerank failed, fallback to hybrid score", exc_info=True)
         return merged
 
     @staticmethod
