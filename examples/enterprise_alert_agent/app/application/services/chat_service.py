@@ -381,6 +381,12 @@ class ChatService:
                 answer = str(fallback_answer or "").strip()
 
             final_answer = str(answer or "").strip()
+            if state.is_multi_task and self.contains_unsupported_policy_inference(final_answer):
+                final_answer = (
+                    "连续 3 次失败后必须升级到二线。"
+                    "对于规则未覆盖的情况，当前知识库没有规定具体处置流程，"
+                    "建议查询正式 SOP 或请求人工确认，不能自行推断。"
+                )
             if final_answer:
                 for chunk in _yield_text_chunks(final_answer):
                     yield chunk
@@ -658,6 +664,16 @@ class ChatService:
             "weekday",
         ]
         return any(keyword in text for keyword in time_keywords)
+
+    @staticmethod
+    def contains_unsupported_policy_inference(answer: str) -> bool:
+        forbidden_phrases = (
+            "唯一合规操作是维持当前处置层级",
+            "必须维持一线",
+            "不得升级",
+            "应维持当前处置层级",
+        )
+        return any(phrase in answer for phrase in forbidden_phrases)
 
     async def abuild_memory_summary(
         self,
