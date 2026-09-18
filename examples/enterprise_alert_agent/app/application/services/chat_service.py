@@ -178,6 +178,12 @@ class ChatService:
             intent_classification, module_activation = await self._aclassify_intent(
                 req.query, self.model_client, parent_run=ask_run
             )
+            should_retrieve = (
+                module_activation.get("rag", True)
+                and intent_classification.confidence >= 0.7
+                and intent_classification.category in {"retrieve", "query"}
+            )
+
             tool_selection: ToolSelection | None = None
             tools_resolution = await self._aresolve_tools(module_activation)
             available_tools: list[dict[str, Any]] = tools_resolution["available"]
@@ -259,7 +265,7 @@ class ChatService:
             context = ""
             docs: list[dict[str, str]] = []
             citations: list[Citation] = []
-            if not self.is_query_time(req.query) and module_activation.get("rag", True):
+            if not self.is_query_time(req.query) and should_retrieve:
                 docs = await asyncio.to_thread(
                     self.retriever.retrieve,
                     req.query,
@@ -793,8 +799,12 @@ class ChatService:
             "回答要求：\n"
             "1. 先给出明确结论；\n"
             "2. 说明关键事实依据；\n"
-            "3. 不得编造知识库中没有的规则；\n"
+            "3. 不得编造知识库中没有的规则、流程、权限或处置动作。\n"
             "4. 如果有引用来源，必须保持结论与引用内容一致。\n"
+            "5. 当用户询问知识库未覆盖的后续处理时，只能说明信息不足，"
+            "并建议查询正式 SOP、监控平台或请求人工确认。\n"
+            "6. 不得把‘知识库没有规定’推导成‘唯一合规操作是……’。\n"
+            "7. 多任务回答必须逐项回应每个子任务，不能只完成其中一部分。\n"
             "如果不需要调用工具，直接给出结论。\n"
             f"\n【知识库证据】\n{context or '暂无相关知识库证据'}"
         )
@@ -1360,7 +1370,9 @@ class ChatService:
                 TaskStatus.SUCCEEDED if outcome.resolved else TaskStatus.FAILED,
             )
 
-        task_status_map = {subtask.task_id: "queued" for subtask in decomposition.subtasks}
+        task_status_map = {
+            subtask.task_id: TaskStatus.QUEUED.value for subtask in decomposition.subtasks
+        }
         for subtask in decomposition.subtasks:
             execution_snapshot = self._build_task_execution_snapshot(
                 req_query=req_query,
@@ -1387,14 +1399,17 @@ class ChatService:
             runnable_subtasks: list[SubTask] = []
             for subtask in batch:
                 deps = decomposition.dependencies.get(subtask.task_id, subtask.depends_on)
-                failed_deps = [dep for dep in deps if task_status_map.get(dep) != "success"]
+                # 判断前置依赖的状态是否成功。没有依赖或者前置依赖都成功才会继续执行当前子任务
+                failed_deps = [
+                    dep for dep in deps if task_status_map.get(dep) != TaskStatus.SUCCEEDED.value
+                ]
                 if failed_deps:
                     logger.warning(
                         "Subtask %s skipped due to failed dependencies: %s",
                         subtask.task_id,
                         failed_deps,
                     )
-                    task_status_map[subtask.task_id] = "skipped"
+                    task_status_map[subtask.task_id] = TaskStatus.SKIPPED.value
                     failed_task_ids.append(subtask.task_id)
                     await self.memory.aupsert_task_state(
                         request_id=request_id,
@@ -1428,7 +1443,7 @@ class ChatService:
                     return await arun_one_task(subtask)
 
             for subtask in runnable_subtasks:
-                task_status_map[subtask.task_id] = "running"
+                task_status_map[subtask.task_id] = TaskStatus.RUNNING.value
 
             results = await asyncio.gather(*(_limited(st, semaphore) for st in runnable_subtasks))
             for tid, success, out, retry_times, used_fallback, agent_id, status in results:
@@ -1461,7 +1476,7 @@ class ChatService:
                         agent_id,
                     )
                 else:
-                    task_status_map[tid] = "failed"
+                    task_status_map[tid] = TaskStatus.FAILED.value
                     failed_task_ids.append(tid)
                     logger.warning(
                         "Subtask %s failed after %d retries, last error: %s (assigned_agent=%s)",
@@ -1477,7 +1492,9 @@ class ChatService:
                         state.fallback_strategy = "tool_chain"
 
         total_tasks = len(decomposition.subtasks)
-        completed_tasks = total_tasks - len(failed_task_ids)
+        completed_tasks = sum(
+            1 for status in task_status_map.values() if status == TaskStatus.SUCCEEDED.value
+        )
         elapsed = time.perf_counter() - started
         return ParallelTaskResult(
             completed_tasks=completed_tasks,
@@ -1491,7 +1508,9 @@ class ChatService:
             task_status_mapping=task_status_map,
             execute_batches=[[subtask.task_id for subtask in batch] for batch in batches],
             skipped_task_ids=[
-                task_id for task_id, status in task_status_map.items() if status == "skipped"
+                task_id
+                for task_id, status in task_status_map.items()
+                if status == TaskStatus.SKIPPED.value
             ],
         )
 
@@ -1529,9 +1548,13 @@ class ChatService:
             if "reviewer_agent" not in agentState.assigned_agent_ids:
                 agentState.assigned_agent_ids.append("reviewer_agent")
             prompt = (
-                "你是独立审阅 Agent。检查回答的正确性、完整性、证据一致性和不确定性声明。"
-                "\n不得补充证据中不存在的事实。"
-                '\n只输出 JSON：{"approved": true, "score": 0.0, "feedback": "..."}'
+                "你是独立审阅 Agent。检查回答的正确性、完整性、证据一致性和不确定性声明。\n"
+                "不得补充证据中不存在的事实、规则、流程、权限或处置动作。\n"
+                "如果回答把‘证据未规定’推导成具体的唯一操作，必须判定为不通过。\n"
+                "如果用户有多个要求，必须检查每个子任务是否都得到回答。\n"
+                "对于证据不足的部分，应要求查询正式 SOP、业务系统或人工确认，"
+                "不能自行推断。\n"
+                '只输出 JSON：{"approved": true, "score": 0.0, "feedback": "..."}'
                 f"\n通过阈值：{settings.reflection_min_score}"
                 f"\n\n子任务证据：\n{review_evidence}"
                 f"\n\n待审阅回答：\n{review_draft}"

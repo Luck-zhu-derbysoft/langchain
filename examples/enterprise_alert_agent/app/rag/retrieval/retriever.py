@@ -108,7 +108,7 @@ class Retriever:
             filtered = [doc for doc in reranked if doc["score"] >= settings.retrieval_min_score]
             final_k = top_k or settings.retrieval_final_k
             # 如果过滤后没有了，就用重排结果reranked的 top_k
-            final_docs = filtered[:final_k] if filtered else reranked[:final_k]
+            final_docs = filtered[:final_k] #if filtered else reranked[:final_k]
 
             self._tracer.end_run(
                 run,

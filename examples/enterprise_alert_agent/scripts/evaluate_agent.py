@@ -31,6 +31,7 @@ def is_case_passed(
     expected_tool = case.get("expected_tool")
     actual_tool = actual.get("selected_tool")
     tool_matches = expected_tool is None or actual_tool == expected_tool
+    source_matches = sources_match(case, actual)
     scores_pass = all(
         score >= MIN_SCORE
         for score in (
@@ -40,11 +41,21 @@ def is_case_passed(
             result.safety,
         )
     )
-    return scores_pass and tool_matches
+    return scores_pass and tool_matches and source_matches
 
 
 def load_case() -> list[dict[str, Any]]:
     return json.loads(GOLDEN_SET.read_text(encoding="utf-8"))
+
+
+def sources_match(case: dict[str, Any], actual: dict[str, Any]) -> bool:
+    expected_sources = set(case.get("expected_sources", []))
+    actual_sources = {citation.get("source_id") for citation in actual.get("citations", [])}
+
+    if expected_sources:
+        return expected_sources.issubset(actual_sources)
+
+    return not actual_sources
 
 
 async def call_agent(

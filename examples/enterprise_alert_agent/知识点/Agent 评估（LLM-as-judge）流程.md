@@ -57,6 +57,12 @@ $env:AGENT_TOKEN = $tokenResponse.token
 运行评估，不要按 Ctrl+C
 uv run python scripts/evaluate_agent.py
 
+修改代码的重建方式:
+docker compose up -d --build --force-recreate app
+docker compose build --no-cache app
+docker compose up -d --force-recreate app
+
+
 如果401 Unauthorized报错，操作:
 cd C:\git\rag-langchain\examples\enterprise_alert_agent
 

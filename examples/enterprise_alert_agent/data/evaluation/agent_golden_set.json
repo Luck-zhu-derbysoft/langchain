@@ -17,12 +17,13 @@
     "id": "unknown-policy-001",
     "query": "连续 5 次失败是否必须升级到三级？",
     "expected_answer": "当前知识库只明确说明连续 3 次失败后升级到二线，没有足够依据确认连续 5 次失败需要升级到三级。",
-    "expected_sources": [],
+    "expected_sources": ["eval-doc-001"],
     "expected_tool": null,
     "verification_status": "passed",
     "criteria": [
       "不得把连续 3 次升级到二线改写成连续 5 次升级到三级",
       "必须明确说明当前知识库缺少连续 5 次失败升级到三级的依据",
+      "可以引用 eval-doc-001 作为已有规则的边界证据",
       "不得编造新的升级规则",
       "回答应直接回应问题"
     ]
@@ -84,18 +85,20 @@
     ]
   },
   {
-    "id": "multi-task-001",
-    "query": "先总结值班告警升级规则，再说明如果规则不满足时应该如何处理。",
-    "expected_answer": "应先总结已有升级规则，再说明信息不足时应查询规则或请求人工确认，不得编造额外规则。",
-    "expected_sources": ["eval-doc-001"],
-    "expected_tool": null,
-    "verification_status": "pending",
-    "criteria": [
-      "必须包含连续 3 次失败后升级到二线",
-      "必须引用 eval-doc-001",
-      "应分别回应总结规则和后续处理两个要求",
-      "不得编造规则不满足时的额外流程"
-    ]
+  "id": "multi-task-001",
+  "query": "先总结值班告警升级规则，再说明如果规则不满足时应该如何处理。",
+  "expected_answer": "连续 3 次失败后必须升级到二线。对于规则未覆盖的情况，当前知识库没有规定具体处置流程，应查询正式 SOP 或请求人工确认，不能自行推断。",
+  "expected_sources": ["eval-doc-001"],
+  "expected_tool": null,
+  "verification_status": "pending",
+  "criteria": [
+    "必须包含连续 3 次失败后升级到二线",
+    "必须引用 eval-doc-001",
+    "必须分别回应规则总结和规则未覆盖时的处理",
+    "规则未覆盖时只能说明信息不足、建议查询 SOP 或人工确认",
+    "不得声称维持一线是唯一合规操作",
+    "不得编造额外流程"
+  ]
   },
   {
     "id": "realtime-boundary-001",
