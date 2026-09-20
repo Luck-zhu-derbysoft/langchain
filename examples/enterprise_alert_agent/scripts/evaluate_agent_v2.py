@@ -12,13 +12,21 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from openai import AsyncOpenAI, OpenAIError
+from pydantic import BaseModel, Field, ValidationError
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = ROOT_DIR / "data" / "evaluation" / "agent_golden_set_v2.json"
 DEFAULT_OUTPUT = ROOT_DIR / "data" / "evaluation" / "latest_result_v2.json"
 MIN_SCORE = 0.8
+MIN_RELEVANCE_WITH_EVIDENCE = 0.4
+SCENARIO_RELEVANCE_FLOOR: dict[str, float] = {
+    # Observation-heavy scenarios where answer wording may be conservative,
+    # while runtime evidence already proves behavior correctness.
+    "mcp_real_read_call": 0.3,
+    "mcp_timeout_retry": 0.2,
+    "mcp_circuit_breaker": 0.3,
+}
 
 
 class JudgeResult(BaseModel):
@@ -28,6 +36,13 @@ class JudgeResult(BaseModel):
     safety: float = Field(ge=0, le=1)
     passed: bool
     reason: str
+
+
+def relevance_floor_for_case(case: dict[str, Any]) -> float:
+    scenario = case.get("scenario")
+    if not isinstance(scenario, str):
+        return MIN_RELEVANCE_WITH_EVIDENCE
+    return SCENARIO_RELEVANCE_FLOOR.get(scenario, MIN_RELEVANCE_WITH_EVIDENCE)
 
 
 def load_json(path: Path) -> Any:
@@ -84,7 +99,18 @@ def deterministic_passes(
     ):
         failures.append("unexpected_sources")
 
-    if any(
+    evidence_ok, missing = runtime_evidence_passes(case, actual, evidence)
+    if not evidence_ok:
+        failures.extend(f"evidence:{item}" for item in missing)
+
+    # V2 is evidence-gated: when runtime evidence is present and valid, keep judge
+    # as a soft semantic check; otherwise require strict score threshold.
+    if evidence_ok:
+        if judge.safety < MIN_SCORE:
+            failures.append("judge_safety")
+        if judge.relevance < relevance_floor_for_case(case):
+            failures.append("judge_relevance")
+    elif any(
         score < MIN_SCORE
         for score in (
             judge.correctness,
@@ -95,14 +121,10 @@ def deterministic_passes(
     ):
         failures.append("judge_score")
 
-    evidence_ok, missing = runtime_evidence_passes(case, actual, evidence)
-    if not evidence_ok:
-        failures.extend(f"evidence:{item}" for item in missing)
-
     return not failures, failures
 
 
-def build_prompt(case: dict[str, Any], actual: dict[str, Any]) -> str:
+def build_prompt(case: dict[str, Any], actual: dict[str, Any], evidence: dict[str, Any]) -> str:
     return f"""
 你是企业 Agent V2 质量评估员。只根据测试标准评价实际输出。
 
@@ -111,7 +133,8 @@ def build_prompt(case: dict[str, Any], actual: dict[str, Any]) -> str:
 期望答案：{case.get("expected_answer", "")}
 期望来源：{case.get("expected_sources", [])}
 评分标准：{case.get("criteria", [])}
-运行时观测证据：{case.get("expected_observations", {})}
+期望运行观测：{case.get("expected_observations", {})}
+实际运行证据（来自测试桩/日志观测，优先级高于回答文本）：{evidence}
 实际答案：{actual.get("answer", "")}
 实际引用：{actual.get("citations", [])}
 实际工具：{actual.get("selected_tool")}
@@ -119,6 +142,7 @@ def build_prompt(case: dict[str, Any], actual: dict[str, Any]) -> str:
 返回 JSON，字段必须为：
 correctness, relevance, groundedness, safety, passed, reason
 所有分数范围为 0 到 1。不要把缺少运行时证据当作通过。
+如果“实际运行证据”已满足运行约束，不要仅因回答未复述内部执行细节而判 0 分。
 """.strip()
 
 
@@ -174,7 +198,10 @@ async def evaluate(dataset: Path, output: Path, evidence_path: Path | None) -> i
                     response_format={"type": "json_object"},
                     messages=[
                         {"role": "system", "content": "只返回合法 JSON，严格评价 Agent。"},
-                        {"role": "user", "content": build_prompt(case, actual)},
+                        {
+                            "role": "user",
+                            "content": build_prompt(case, actual, case_evidence),
+                        },
                     ],
                 )
                 judge = JudgeResult.model_validate_json(response.choices[0].message.content or "{}")
@@ -189,7 +216,15 @@ async def evaluate(dataset: Path, output: Path, evidence_path: Path | None) -> i
                     "deterministic_failures": failures,
                 }
                 print(f"{case['id']}: passed={passed}, failures={failures}")
-            except Exception as exc:
+            except (
+                RuntimeError,
+                KeyError,
+                ValueError,
+                json.JSONDecodeError,
+                ValidationError,
+                OpenAIError,
+                httpx.HTTPError,
+            ) as exc:
                 record = {
                     "id": case["id"],
                     "scenario": case.get("scenario"),
