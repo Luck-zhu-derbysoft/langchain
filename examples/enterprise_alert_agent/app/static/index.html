@@ -356,6 +356,47 @@
         const API_BASE = window.location.origin;
         const CHAT_THREAD_KEY = "chat_thread_id";
         const CHAT_SCOPE_KEY = "chat_scope";
+        const AUTH_TOKEN_KEY = "enterprise_alert_agent_token";
+        const AUTH_CONFIG = {
+            user_id: "demo-user",
+            role: "operator",
+            api_key: "local-evaluation-admin-key",
+            tenant_id: "demo-tenant",
+        };
+
+        async function requestToken() {
+            const res = await fetch(`${API_BASE}/admin/token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(AUTH_CONFIG),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.token) {
+                throw new Error(formatErrorDetail(data.detail || data || '获取认证 token 失败'));
+            }
+            localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+            return data.token;
+        }
+
+        async function getAuthToken(forceRefresh = false) {
+            if (!forceRefresh) {
+                const cachedToken = localStorage.getItem(AUTH_TOKEN_KEY);
+                if (cachedToken) return cachedToken;
+            }
+            return requestToken();
+        }
+
+        async function authenticatedFetch(url, options = {}, retry = true) {
+            const token = await getAuthToken();
+            const headers = new Headers(options.headers || {});
+            headers.set('Authorization', `Bearer ${token}`);
+            const res = await fetch(url, { ...options, headers });
+            if (res.status === 401 && retry) {
+                localStorage.removeItem(AUTH_TOKEN_KEY);
+                return authenticatedFetch(url, options, false);
+            }
+            return res;
+        }
 
         function getChatScope() {
             let scope = { tenant_id: "demo-tenant", user_id: "demo-user", business_context: "" };
@@ -436,9 +477,11 @@
         // --- 加载统计 ---
         async function loadStats() {
             try {
-                const res = await fetch(`${API_BASE}/ingest/stats`);
+                const res = await authenticatedFetch(`${API_BASE}/ingest/stats`);
                 const data = await res.json();
-                document.getElementById('docCount').textContent = data.total_documents;
+                document.getElementById('docCount').textContent = res.ok
+                    ? data.total_documents
+                    : '认证失败';
             } catch (e) {
                 document.getElementById('docCount').textContent = '无法连接';
             }
@@ -469,7 +512,7 @@
             let citationsHtml = '';
 
             try {
-                const res = await fetch(`${API_BASE}/chat/stream`, {
+                const res = await authenticatedFetch(`${API_BASE}/chat/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -547,7 +590,7 @@
             btn.innerHTML = '清理中<span class="loading"></span>';
 
             try {
-                const res = await fetch(`${API_BASE}/chat/memory/clear`, {
+                const res = await authenticatedFetch(`${API_BASE}/chat/memory/clear`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -600,7 +643,7 @@
             formData.append('category', category);
 
             try {
-                const res = await fetch(`${API_BASE}/ingest/file`, {
+                const res = await authenticatedFetch(`${API_BASE}/ingest/file`, {
                     method: 'POST',
                     body: formData,
                 });
@@ -651,7 +694,7 @@
             if (category) body.metadata.category = category;
 
             try {
-                const res = await fetch(`${API_BASE}/ingest/text`, {
+                const res = await authenticatedFetch(`${API_BASE}/ingest/text`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
@@ -684,7 +727,10 @@
 
         // 页面加载时获取统计
         initChatScope();
-        loadStats();
+        getAuthToken().then(loadStats).catch((error) => {
+            document.getElementById('docCount').textContent = '认证失败';
+            console.error('认证失败:', error);
+        });
     </script>
 </body>
 
