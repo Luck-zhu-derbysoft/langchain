@@ -14,4 +14,4 @@ if ([string]::IsNullOrWhiteSpace($env:DASHSCOPE_API_KEY)) {
 	Write-Host "DASHSCOPE_API_KEY detected in current shell."
 }
 
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uv run python scripts/run_uvicorn.py

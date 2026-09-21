@@ -7,13 +7,8 @@
       "command": "uv",
       "args": [
         "run",
-        "uvicorn",
-        "app.main:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8000",
-        "--reload"
+        "python",
+        "scripts/run_uvicorn.py"
       ],
       "options": {
         "cwd": "${workspaceFolder}/examples/enterprise_alert_agent"

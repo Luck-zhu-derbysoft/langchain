@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     model_name: str = "qwen-plus"
     fallback_model_name: str = "qwen-turbo"  # 主模型失败后的降级模型
-    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_base_url: str = ""
     # 多 provider 配置
     openai_api_key: str = "213"
     openai_base_url: str = "https://api.openai.com/v1"

@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.schemas.chat import ChatRequest, ClearRequest
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 # 在模块级别创建干预处理器实例
 
 
@@ -43,6 +45,13 @@ async def chat_stream(
 ) -> StreamingResponse:
     req.tenant_id = _auth.tenant_id
     req.user_id = _auth.sub
+    logger.info(
+        "Chat request accepted: tenant=%s user=%s thread=%s query=%s",
+        req.tenant_id,
+        req.user_id,
+        req.thread_id,
+        req.query[:200],
+    )
     root_run = service.trace.start_root(
         name="api.chat.stream",
         run_type="chain",
@@ -56,6 +65,14 @@ async def chat_stream(
             async for chunk in service.aask_stream(req, parent_run=root_run):
                 stream_request_id = str(chunk.get("request_id") or "")
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception(
+                "Chat stream failed: tenant=%s user=%s request_id=%s",
+                req.tenant_id,
+                req.user_id,
+                stream_request_id,
+            )
+            raise
         finally:
             service.trace.end_run(
                 root_run,
@@ -63,6 +80,12 @@ async def chat_stream(
                     "request_id": stream_request_id,
                     "stream": True,
                 },
+            )
+            logger.info(
+                "Chat stream finished: tenant=%s user=%s request_id=%s",
+                req.tenant_id,
+                req.user_id,
+                stream_request_id,
             )
 
     return StreamingResponse(

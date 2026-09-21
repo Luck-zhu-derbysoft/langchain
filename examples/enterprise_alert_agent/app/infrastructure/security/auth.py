@@ -1,4 +1,5 @@
 import hmac
+import logging
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Annotated, cast
@@ -9,6 +10,8 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
 from app.config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class Role(str, Enum):
@@ -71,6 +74,7 @@ def get_current_user(token: str | None = Depends(oauth2_scheme)) -> TokenPayload
     )
     try:
         if token is None:
+            logger.warning("Authentication failed: bearer token is missing")
             raise credentials_exception
         payload = jwt.decode(
             token, settings.admin_jwt_secret, algorithms=[settings.admin_jwt_algorithm]
@@ -83,7 +87,8 @@ def get_current_user(token: str | None = Depends(oauth2_scheme)) -> TokenPayload
             raise credentials_exception
         token_data = TokenPayload(sub=sub, role=Role(role), exp=exp, tenant_id=tenant_id)
         return token_data
-    except (jwt.PyJWTError, ValueError):
+    except (jwt.PyJWTError, ValueError) as exc:
+        logger.warning("Authentication failed: invalid token (%s)", type(exc).__name__)
         raise credentials_exception
 
 

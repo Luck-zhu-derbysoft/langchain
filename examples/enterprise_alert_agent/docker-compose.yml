@@ -16,6 +16,7 @@ x-app-env: &app-env
   # 关键：容器内主机名走服务名，覆盖 .env 里可能残留的公网 IP
   REDIS_HOST: redis
   PG_HOST: postgres
+  LANGGRAPH_CHECKPOINT_DSN: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:${PG_PORT:-5432}/${PG_DB:-postgres}
 
 services:
   app:

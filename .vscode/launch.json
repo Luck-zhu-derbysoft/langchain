@@ -12,14 +12,8 @@
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}/examples/enterprise_alert_agent/.venv/Scripts/python.exe",
-      "module": "uvicorn",
+      "program": "${workspaceFolder}/examples/enterprise_alert_agent/scripts/run_uvicorn.py",
       "args": [
-        "app.main:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8000",
-        "--reload"
       ],
       "cwd": "${workspaceFolder}/examples/enterprise_alert_agent",
       "envFile": "${workspaceFolder}/examples/enterprise_alert_agent/.env",
@@ -32,14 +26,8 @@
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}/examples/enterprise_alert_agent/.venv/Scripts/python.exe",
-      "module": "uvicorn",
+      "program": "${workspaceFolder}/examples/enterprise_alert_agent/scripts/run_uvicorn.py",
       "args": [
-        "app.main:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "8000",
-        "--reload"
       ],
       "cwd": "${workspaceFolder}/examples/enterprise_alert_agent",
       "envFile": "${workspaceFolder}/examples/enterprise_alert_agent/.env",
