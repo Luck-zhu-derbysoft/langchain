@@ -264,6 +264,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                     status="active",
                     last_message_at=now,
                     expires_at=expires_at,
+                    created_at=now,
                 )
                 .on_conflict_do_update(
                     index_elements=["tenant_id", "user_id", "thread_id"],
