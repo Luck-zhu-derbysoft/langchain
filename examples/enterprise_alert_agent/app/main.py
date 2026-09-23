@@ -477,7 +477,7 @@ def create_app() -> FastAPI:
 
 
 async def _drain_inflight(sem: asyncio.Semaphore, timeout: float) -> bool:
-    """排空在途请求：直到能连续拿到 max_concurrent_requests 个许可（= 无在途请求）。"""
+    """排空在途请 求：直到能连续拿到 max_concurrent_requests 个许可（= 无在途请求）。"""
     deadline = time.monotonic() + timeout
     acquired = 0
     while time.monotonic() < deadline:
