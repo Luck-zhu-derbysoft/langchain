@@ -36,7 +36,7 @@ async def _stream_finished() -> None:
 
 
 async def drain_active_streams(timeout: float) -> bool:
-    """等待所有正在执行的 SSE 流（含 MCP 工具调用）结束，供优雅关闭调用。"""
+    """计数器不依赖中间件的 call_next 时机，而是绑定生成器本身真正的生命周期"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _active_stream_count == 0:
