@@ -38,6 +38,7 @@
 | RAG 评估 | ⚠️ 无自动化 | Golden Set 脚本 | 🟠 |
 | 知识图谱 / GraphRAG | ❌ 无 | 最小实体关系图 | 🟢 |
 | Fine-tuning / Hugging Face | ❌ 无 | HF 本地推理 demo | 🟢 |
+|这个项目没有用 FastAPI 的 Depends() 做单例生命周期管理，而是在 create_app() 里手动构造好所有单例对象，塞进 app.state.shared_dependencies，请求级的 Depends(_get_chat_service) 只是从这个字典里取出单例、拼装出一个请求级的 ChatService 门面对象
 
 ### 5. 弹性与高并发（核心3 + 文档5）
 | 熔断 / 背压 / 优雅停机 | ✅ 已全做 | 复盘状态机 | 🟡 |

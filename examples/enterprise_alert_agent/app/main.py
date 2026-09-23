@@ -9,8 +9,6 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
-from app.api.routers.chat import drain_active_streams
-
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -411,6 +409,8 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def shutdown_resources() -> None:
+        from app.api.routers.chat import drain_active_streams
+
         logger.info("Application shutdown started")
         try:
             # 1) 排空在途请求：等全局闸门完全空闲（或超时），期间停止接收新请求
