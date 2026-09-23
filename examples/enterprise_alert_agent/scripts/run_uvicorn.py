@@ -18,4 +18,8 @@ if __name__ == "__main__":
         port=8000,
         reload=True,
         reload_dirs=[str(project_dir / "app")],
+        # __pycache__/*.pyc 由 import 时自动重写，不是真正的源码改动，
+        # 排除掉避免误触发 reload 打断正在处理中的长耗时请求（如 Agent 多轮工具调用）
+        reload_excludes=["*/__pycache__/*", "*.pyc"],
+        timeout_graceful_shutdown=120,
     )

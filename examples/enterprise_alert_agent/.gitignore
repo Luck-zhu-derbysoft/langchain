@@ -5,5 +5,4 @@ __pycache__/
 .venv/
 *.pyc
 知识点/*.zip
-logs/
 *.txt

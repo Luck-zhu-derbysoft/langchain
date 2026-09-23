@@ -97,13 +97,15 @@ class RemoteMCPClient:
 
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
-            if self._session is None or not self._initialized:
-                # 会话缺失/已损坏（对端断开、进程重启等）：先重连再重试，而不是直接失败
-                if not await self._reconnect():
-                    last_error = RuntimeError("MCP session not initialized")
-                    break
             try:
                 async with self._call_lock:
+                    # 重连必须和实际调用共用同一把锁：并发子任务同时触发重连会
+                    # 在不同 asyncio task 里操作同一个 anyio cancel scope，引发
+                    # "Attempted to exit cancel scope in a different task" 崩溃
+                    if self._session is None or not self._initialized:
+                        if not await self._reconnect():
+                            last_error = RuntimeError("MCP session not initialized")
+                            break
                     logger.info("MCP call start: tool=%s attempt=%d", tool_name, attempt)
                     result = await asyncio.wait_for(
                         self._session.call_tool(name=tool_name, arguments=tool_args),  # type: ignore[union-attr]
