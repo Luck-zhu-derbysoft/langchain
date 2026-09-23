@@ -35,7 +35,7 @@ async def _stream_finished() -> None:
         _active_stream_count -= 1
 
 
-async def get_current_active_stream_count(timeout: float) -> bool:
+async def drain_active_streams(timeout: float) -> bool:
     """等待所有正在执行的 SSE 流（含 MCP 工具调用）结束，供优雅关闭调用。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -123,7 +123,6 @@ async def chat_stream(
                 req.user_id,
                 stream_request_id,
             )
-
 
     return StreamingResponse(
         aiter_sse(),

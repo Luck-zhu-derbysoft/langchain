@@ -9,7 +9,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
-from app.api.routers.chat import get_current_active_stream_count
+from app.api.routers.chat import drain_active_streams
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -419,9 +419,7 @@ def create_app() -> FastAPI:
             ):
                 logger.warning("Not all in-flight requests completed before shutdown timeout")
             # 排空仍在执行的 SSE 流（含正在等待 MCP 返回的工具调用）
-            if not await get_current_active_stream_count(
-                settings.graceful_shutdown_timeout_seconds
-            ):
+            if not await drain_active_streams(settings.graceful_shutdown_timeout_seconds):
                 logger.warning("Not all active streams completed before shutdown timeout")
             # 2) 关闭各类资源
             audit_logger.flush_to_file()  # 确保审计日志落盘
