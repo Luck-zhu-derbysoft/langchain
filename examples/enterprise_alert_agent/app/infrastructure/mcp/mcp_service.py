@@ -99,10 +99,12 @@ class RemoteMCPClient:
 
         try:
             async with self._call_lock:
+                logger.info("MCP call start: tool=%s", tool_name)
                 result = await asyncio.wait_for(
                     self._session.call_tool(name=tool_name, arguments=tool_args),
                     timeout=settings.mcp_call_timeout_seconds,
                 )
+                logger.info("MCP call completed: tool=%s", tool_name)
             content = result.content
             if isinstance(content, list) and content:
                 texts = [getattr(item, "text", str(item)) for item in content if item is not None]

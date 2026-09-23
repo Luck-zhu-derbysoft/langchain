@@ -12,6 +12,9 @@ from typing import Any, TypedDict, cast
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langsmith.run_trees import RunTree
 
+from app.application.services.runtime_catalog_responder import (
+    answer_if_matched as answer_runtime_catalog_query,
+)
 from app.config.dynamic_settings import ConfigManager
 from app.config.settings import settings
 from app.infrastructure.agent.a2a_protocol import (
@@ -39,6 +42,7 @@ from app.infrastructure.agent.langgraph_reflection import (
     ReviewDecision,
 )
 from app.infrastructure.cache.multi_tier_cache import multi_tier_cache
+from app.infrastructure.capabilities.runtime_catalog import get_runtime_capabilities
 from app.infrastructure.fault.fault_analyzer import FaultAnalyzer
 from app.infrastructure.fault.fault_types import FaultContext
 from app.infrastructure.llm.context_budget import trim_text
@@ -246,6 +250,50 @@ class ChatService:
                 }
                 return
             self.metrics_collector.record_cache_miss(request_id=request_id)
+
+            catalog_answer = answer_runtime_catalog_query(req.query)
+            if catalog_answer is not None:
+                logger.info(
+                    "[%s] Runtime catalog query detected, answering deterministically",
+                    request_id,
+                )
+                for chunk in _yield_text_chunks(catalog_answer):
+                    yield chunk
+                self.trace.end_run(
+                    ask_run,
+                    outputs={
+                        "request_id": request_id,
+                        "is_multi_task": False,
+                        "failed_task_count": 0,
+                        "answer_mode": "runtime_catalog_direct",
+                    },
+                )
+                yield {
+                    "type": "done",
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "answer": catalog_answer,
+                    "citations": [],
+                    "model": settings.model_name,
+                    "intent": "runtime_catalog_query",
+                    "intent_confidence": 1.0,
+                    "selected_tool": None,
+                    "tool_confidence": None,
+                    "fallback_tool": [],
+                    "tool_selection_reason": "Deterministic runtime catalog response",
+                    "task_decomposed": False,
+                    "is_multi_task": False,
+                    "multi_task_results": None,
+                    "failed_tasks": [],
+                    "manual_intervention_required": False,
+                    "retry_count": 0,
+                    "fallback_used": False,
+                    "fallback_strategy": "",
+                    "active_agent_id": "router_agent",
+                    "assigned_agent_ids": ["router_agent"],
+                    "performance_metrics": {},
+                }
+                return
 
             history_scope = MemoryScope(
                 tenant_id=req.tenant_id,
@@ -806,20 +854,25 @@ class ChatService:
         mcp_tool_map: dict[str, SkillFunc],
         tool_selection: ToolSelection | None = None,
     ) -> str:
+        capabilities = get_runtime_capabilities()
+        runtime_catalog = json.dumps(
+            [capability.to_dict() for capability in capabilities],
+            ensure_ascii=False,
+            indent=2,
+        )
         system_prompt = (
             "你是一个企业级智能体。\n"
-            "回答时必须按以下事实来源优先级处理：\n"
-            "1. 【运行时系统事实】：当前已注册工具、MCP 连接状态、工具名称、服务配置；\n"
-            "2. 【工具调用结果】：工具实际返回的数据；\n"
-            "3. 【知识库证据】：文档、SOP、业务知识。\n"
-            "当用户询问工具注册情况、MCP 服务能力、MCP 工具列表或系统当前配置时，"
-            "必须优先使用【运行时系统事实】回答；这类问题不能因为知识库没有文档而回答信息不足。\n"
-            "只有上述三个来源都没有相关事实时，才说明信息不足。\n"
-            "不得编造任何未提供的规则、流程、权限或处置动作。\n"
-            "回答要求：先给出明确结论，再列出关键依据。\n"
-            f"\n【运行时系统事实】"
-            f"\n- MCP 已启用: {'是' if settings.mcp_enabled else '否'}"
-            f"\n- MCP 服务地址: {settings.mcp_service_url or '未配置'}"
+            "回答时按以下来源优先级使用事实：\n"
+            "1. 【运行时能力目录】：系统启动或运行中实际发现并注册的服务、工具、Agent、集成；\n"
+            "2. 【工具调用结果】：运行时执行返回的数据；\n"
+            "3. 【知识库证据】：静态文档、SOP、业务知识。\n"
+            "当用户询问当前系统具备哪些能力、哪些服务已连接、哪些工具已注册、"
+            "哪些 Agent 可用或某项能力由谁提供时，必须优先依据【运行时能力目录】回答。\n"
+            "目录中列出的条目是已确认的运行时事实。不得因条目底层实现、命名风格、"
+            "业务领域或知识库未说明而否定、重分类或猜测其身份。\n"
+            "仅当运行时能力目录、工具调用结果和知识库证据均没有相关信息时，"
+            "才可以说明信息不足。\n"
+            f"\n【运行时能力目录】\n{runtime_catalog or '当前未发现已注册能力'}"
             f"\n\n【知识库证据】\n{context or '暂无相关知识库证据'}"
         )
         if tool_selection and tool_selection.confidence >= 0.5:
@@ -987,9 +1040,19 @@ class ChatService:
         available_tools: list[dict[str, Any]],
         parent_run: RunTree | None = None,
     ) -> ToolSelection:
+        # tools_str = "\n".join(
+        #     [f"- {t.get('name')}: {t.get('description', '')}" for t in available_tools]
+        # )
+        tool_candidates = [
+            capability.to_dict()
+            for capability in get_runtime_capabilities()
+            if capability.kind == "tool"
+        ]
         tools_str = "\n".join(
-            [f"- {t.get('name')}: {t.get('description', '')}" for t in available_tools]
+            f"- {item['name']} [{item['provider']}]: {item['description']}"
+            for item in tool_candidates
         )
+
         tool_selection_prompt = (
             "你是一个企业级工具选择器。请根据用户查询和意图分类，选择最合适的工具。"
             "如果没有合适的工具，请返回空字符串。\n"

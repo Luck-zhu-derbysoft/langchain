@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
@@ -17,6 +19,30 @@ from app.schemas.chat import ChatRequest, ClearRequest
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 # 在模块级别创建干预处理器实例
+_active_stream_count = 0
+_active_stream_count_lock = asyncio.Lock()
+
+
+async def _stream_started() -> None:
+    global _active_stream_count
+    async with _active_stream_count_lock:
+        _active_stream_count += 1
+
+
+async def _stream_finished() -> None:
+    global _active_stream_count
+    async with _active_stream_count_lock:
+        _active_stream_count -= 1
+
+
+async def get_current_active_stream_count(timeout: float) -> bool:
+    """等待所有正在执行的 SSE 流（含 MCP 工具调用）结束，供优雅关闭调用。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _active_stream_count == 0:
+            return True
+        await asyncio.sleep(0.1)
+    return False
 
 
 def _get_chat_service(request: Request) -> ChatService:
@@ -61,10 +87,19 @@ async def chat_stream(
 
     async def aiter_sse() -> AsyncGenerator[str, None]:
         stream_request_id: str | None = None
+        await _stream_started()
         try:
             async for chunk in service.aask_stream(req, parent_run=root_run):
                 stream_request_id = str(chunk.get("request_id") or "")
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            logger.warning(
+                "Chat stream cancelled: tenant=%s user=%s request_id=%s",
+                req.tenant_id,
+                req.user_id,
+                stream_request_id,
+            )
+            raise
         except Exception:
             logger.exception(
                 "Chat stream failed: tenant=%s user=%s request_id=%s",
@@ -74,6 +109,7 @@ async def chat_stream(
             )
             raise
         finally:
+            await _stream_finished()
             service.trace.end_run(
                 root_run,
                 outputs={
@@ -87,6 +123,7 @@ async def chat_stream(
                 req.user_id,
                 stream_request_id,
             )
+
 
     return StreamingResponse(
         aiter_sse(),
