@@ -106,7 +106,7 @@ class RemoteMCPClient:
                 if request.future and not request.future.done():
                     request.future.set_result(response)
         finally:
-            await self.shutdown_worker_resources()
+            await self._shutdown_worker_resources()
             self._worker_task = None
 
     async def _handle_request(
@@ -201,7 +201,7 @@ class RemoteMCPClient:
     def get_tools_metadata(self) -> list[dict[str, Any]]:
         return self._tools_meta
 
-    async def shutdown_worker_resources(self) -> None:
+    async def _shutdown_worker_resources(self) -> None:
         try:
             if self._exit_stack is not None:
                 await self._exit_stack.aclose()
