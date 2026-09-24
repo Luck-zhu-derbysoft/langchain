@@ -79,10 +79,19 @@ class RemoteMCPClient:
             self._exit_stack = stack
             logger.info("MCP client initialized successfully with %d tools", len(self._tools_meta))
             return True
-        except Exception:
+        except (
+            httpx.HTTPError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+        ):
             logger.exception("MCP client initialization failed")
             return False
-    #MCP Session Worker 单工作线程队列模型 核心精简文档.md
+
+    # MCP Session Worker 单工作线程队列模型 核心精简文档.md
     async def initialize(self) -> bool:
         if self._worker_task is not None:
             return self._initialized
@@ -113,15 +122,19 @@ class RemoteMCPClient:
         self, tool_name: str, tool_args: dict[str, Any], *, max_attempts: int = 2
     ) -> dict[str, Any]:
         for attempt in range(1, max_attempts + 1):
+            session = self._session
             try:
-                if self._session is None or self._exit_stack is None:
+                if session is None or self._exit_stack is None:
                     conn = await self._do_connect()
                     if not conn:
-                        raise RuntimeError("Failed to connect to MCP server")  # 同样未被包住
+                        raise RuntimeError("Failed to connect to MCP server")
+                    session = self._session
+                    if session is None:
+                        raise RuntimeError("MCP session was not created")
                 logger.info("MCP call start: tool=%s attempt=%d", tool_name, attempt)
 
                 result = await asyncio.wait_for(
-                    self._session.call_tool(name=tool_name, arguments=tool_args),
+                    session.call_tool(name=tool_name, arguments=tool_args),
                     timeout=settings.mcp_call_timeout_seconds,
                 )
                 logger.info("MCP call completed: tool=%s", tool_name)
@@ -144,7 +157,15 @@ class RemoteMCPClient:
                     "error_code": "",
                     "message": "ok",
                 }
-            except Exception as e:
+            except (
+                AttributeError,
+                ConnectionError,
+                OSError,
+                RuntimeError,
+                TimeoutError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 # 会话可能已损坏（比如连接被对端关闭），标记为未初始化，下一轮循环触发重连
                 self._initialized = False
                 logger.warning(
@@ -152,14 +173,14 @@ class RemoteMCPClient:
                     attempt,
                     max_attempts,
                     tool_name,
-                    e,
+                    exc,
                 )
                 if self._session is not None:
                     try:
                         if self._exit_stack is not None:
                             await self._exit_stack.aclose()
-                    except Exception as e:
-                        logger.warning("Error closing MCP session: %s", e)
+                    except (AttributeError, OSError, RuntimeError, TimeoutError, ValueError) as close_exc:
+                        logger.warning("Error closing MCP session: %s", close_exc)
                     finally:
                         self._session = None
                         self._exit_stack = None
@@ -205,8 +226,8 @@ class RemoteMCPClient:
         try:
             if self._exit_stack is not None:
                 await self._exit_stack.aclose()
-        except Exception as e:
-            logger.warning("Error closing exit stack: %s", e)
+        except (AttributeError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            logger.warning("Error closing exit stack: %s", exc)
         finally:
             self._session = None
             self._tools_meta = []
@@ -218,8 +239,3 @@ class RemoteMCPClient:
             return
         await self._queue.put(None)
         await self._worker_task
-
-    async def _do_close(self) -> None:
-        if self._queue is None:
-            return
-        await self._queue.put(None)
