@@ -82,7 +82,7 @@ class RemoteMCPClient:
         except Exception:
             logger.exception("MCP client initialization failed")
             return False
-
+    #MCP Session Worker 单工作线程队列模型 核心精简文档.md
     async def initialize(self) -> bool:
         if self._worker_task is not None:
             return self._initialized
