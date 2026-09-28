@@ -105,10 +105,11 @@ class Retriever:
 
             # RAG 混合检索（Hybrid Search + 重排）
             reranked = self._hybrid_rerank(rewritten_query, candidates)
-            filtered = [doc for doc in reranked if doc["score"] >= settings.retrieval_min_score]
+            # filtered = [doc for doc in reranked if doc["score"] >= settings.retrieval_min_score]
             final_k = top_k or settings.retrieval_final_k
+            filtered = reranked
             # 如果过滤后没有了，就用重排结果reranked的 top_k
-            final_docs = filtered[:final_k] #if filtered else reranked[:final_k]
+            final_docs = filtered[:final_k]  # if filtered else reranked[:final_k]
 
             self._tracer.end_run(
                 run,
@@ -156,10 +157,11 @@ class Retriever:
             item["score"] = hybrid
             merged.append(item)
         merged.sort(key=lambda d: d["score"], reverse=True)
-        if settings.rerank_enabled:
+        merged = [mer for mer in merged if mer["score"] > settings.retrieval_min_score]
+        if settings.rerank_enabled and merged:
             try:
                 merged = self._flashrank_rerank(query, merged)
-            except Exception as e:
+            except Exception:
                 logger.warning("flashrank rerank failed, fallback to hybrid score", exc_info=True)
         return merged
 
