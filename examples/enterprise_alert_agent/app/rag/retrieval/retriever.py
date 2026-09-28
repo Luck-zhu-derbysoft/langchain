@@ -96,28 +96,34 @@ class Retriever:
             # 查询重写（Query Rewriting）
             rewritten_query = self._rewrite_query(query, history_text)
             candidate_k = max(settings.retrieval_candidate_k, (top_k or settings.retrieval_final_k))
-            candidates = self._store.query(
-                rewritten_query, top_k=candidate_k, where=where, parent_run=run
-            )  # 传递 parent_run 以便在向量库查询中记录路径
-            if not candidates:
-                self._tracer.end_run(run, outputs={"hits": 0, "mode": "empty"})
-                return []
+            # candidates = self._store.query(
+            #     rewritten_query, top_k=candidate_k, where=where, parent_run=run
+            # )  # 传递 parent_run 以便在向量库查询中记录路径
+            # if not candidates:
+            #     self._tracer.end_run(run, outputs={"hits": 0, "mode": "empty"})
+            #     return []
 
-            # RAG 混合检索（Hybrid Search + 重排）
-            reranked = self._hybrid_rerank(rewritten_query, candidates)
+            # # RAG 混合检索（Hybrid Search + 重排）
+            # reranked = self._hybrid_rerank(rewritten_query, candidates)
             # filtered = [doc for doc in reranked if doc["score"] >= settings.retrieval_min_score]
-            final_k = top_k or settings.retrieval_final_k
-            filtered = reranked
-            # 如果过滤后没有了，就用重排结果reranked的 top_k
-            final_docs = filtered[:final_k]  # if filtered else reranked[:final_k]
+            dense_docs = self._store.query(
+                rewritten_query, top_k=candidate_k, where=where, parent_run=run
+            )
+            lexical_docs = (
+                (self._lexical_search(rewritten_query, top_k=candidate_k, where=where))
+                if settings.retrieval_use_bm25
+                else []
+            )
+            merged = self._rrf_merge(dense_docs, lexical_docs)
+            if settings.rerank_enabled and merged:
+                merged = self._flashrank_rerank(rewritten_query, merged)
+            final_docs = merged[: top_k or settings.retrieval_final_k]
 
             self._tracer.end_run(
                 run,
                 outputs={
                     "hits": len(final_docs),
                     "candidate_k": candidate_k,
-                    "final_k": final_k,
-                    "filtered_count": len(filtered),
                 },
             )
             with self._cache_lock:
@@ -217,3 +223,40 @@ class Retriever:
         except Exception:
             logger.warning("flashrank rerank failed, fallback to hybrid score", exc_info=True)
             return docs
+
+    def _lexical_search(
+        self, query: str, top_k: int = 3, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        documents = list(self._store.iter_documents(where=where))
+        query_tokens = self._tokenize(query)
+        if not documents or not query_tokens:
+            return []
+        corpus = [self._tokenize(str(doc.get("content", ""))) for doc in documents]
+        if not corpus:
+            return []
+        scores = BM25Okapi(corpus).get_scores(query_tokens)  # type: ignore
+        ranked = sorted(
+            (range(len(documents))),
+            key=lambda idx: scores[idx],
+            reverse=True,
+        )
+        return [documents[idx] for idx in ranked if scores[idx] > 0.0][:top_k]
+
+    @staticmethod
+    def _rrf_merge(
+        dense_docs: list[dict[str, Any]],
+        lexical_docs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        if not dense_docs and not lexical_docs:
+            return []
+        k = 60  # Reciprocal Rank Fusion parameter
+        dense_weight = settings.retrieval_hybrid_alpha if settings.retrieval_use_bm25 else 1.0
+        for docs, weight in (
+            (dense_docs, dense_weight),
+            (lexical_docs, 1.0 - dense_weight),
+        ):
+            for rank, doc in enumerate(docs, start=1):
+                item = merged.setdefault(doc["id"], {**doc, "score": 0.0})
+                item["score"] += weight / (k + rank)
+        return sorted(merged.values(), key=lambda d: d["score"], reverse=True)

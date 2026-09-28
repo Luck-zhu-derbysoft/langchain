@@ -5,9 +5,11 @@
 - query: 根据查询向量返回最相似的文档
 """
 
+from pydoc import doc
 import uuid
 from typing import Any
 
+from annotated_types import doc
 import chromadb  # type: ignore[import-untyped]
 from chromadb.config import Settings as ChromaSettings  # type: ignore[import-untyped]
 from langsmith.run_trees import RunTree
@@ -99,12 +101,21 @@ class ChromaStore:
             results = self._collection.query(
                 query_embeddings=[query_embedding],  # type: ignore[arg-type]
                 n_results=top_k,
+                where=where,
                 include=["documents", "metadatas", "distances"],
             )
 
             docs: list[dict[str, Any]] = []
             if results["documents"] and results["metadatas"] and results["distances"]:
-                for doc, meta, distance in zip(
+                # results 结构示例
+                # {
+                #     "ids": [["doc_001", "doc_002"]],
+                #     "documents": [["文本1", "文本2"]],
+                #     "metadatas": [[{"source_id":"file1"}, {"source_id":"file2"}]],
+                #     "distances": [[0.21, 0.35]]
+                # }
+                for doc_id,doc, meta, distance in zip(
+                    results["ids"][0],
                     results["documents"][0],
                     results["metadatas"][0],
                     results["distances"][0],
@@ -113,6 +124,7 @@ class ChromaStore:
                     source_id = str(meta.get("source_id", "unknown")) if meta else "unknown"
                     docs.append(
                         {
+                            "id": doc_id,
                             "source_id": source_id,
                             "content": doc or "",
                             "metadata": meta or {},
@@ -129,3 +141,27 @@ class ChromaStore:
     def count(self) -> int:
         """返回当前 collection 中的文档总数。"""
         return self._collection.count()
+    def iter_documents(self,*, where: dict[str, Any] | None = None) -> :
+        offset =0
+        page_size=500
+        while True:
+            page = self._collection.get(
+                where=where,
+                limit=page_size,
+                offset=offset,
+                include=["documents", "metadatas"],
+            )
+            for doc_id, content, meta in zip(
+                page["ids"],
+                page["documents"], # type: ignore
+                page["metadatas"],# type: ignore
+            ):
+                yield {
+                    "id": doc_id,
+                    "source_id": str(meta.get("source_id", "unknown")) if meta else "unknown",
+                    "content": content or "",
+                    "metadata": meta or {},
+                }
+            if len(page["ids"]) < page_size:
+                break
+            offset += page_size
