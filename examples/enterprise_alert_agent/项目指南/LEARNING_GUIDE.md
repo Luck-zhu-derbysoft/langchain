@@ -33,7 +33,7 @@
 (已修复)| Agent 评估（LLM-as-judge） | ✅ Golden Set + Judge 评分 + CI 门禁 | 持续增加样本并复核评分波动 | 🟠 |
 
 ### 4. RAG 知识层（加分1/4 + 文档4）
-| 混合检索 / 重排 | ✅ 向量候选 + BM25 融合 + FlashRank 重排；BM25 仅对向量候选打分 | 对比开/关重排的 Top-K 命中率；探索独立词法召回 | 🟠 |
+| 混合检索 / 重排 | ✅ 向量候选 + BM25 融合 + FlashRank 重排；
 | 向量库对比（Chroma/Qdrant/Milvus） | ✅ Chroma | Qdrant 跑通对比 | 🟡 |
 | RAG 评估 | ⚠️ 无自动化 | Golden Set 脚本 | 🟠 |
 | 知识图谱 / GraphRAG | ❌ 无 | 最小实体关系图 | 🟢 |
