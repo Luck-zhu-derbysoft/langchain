@@ -105,7 +105,7 @@ class RemoteMCPClient:
             connected = await self._do_connect()
             if not ready.done():
                 ready.set_result(connected)
-            if self._queue is None:
+            if not connected or self._queue is None:
                 return
             while True:
                 request = await self._queue.get()
@@ -114,7 +114,11 @@ class RemoteMCPClient:
                 response = await self._handle_request(request.tool_name, request.tool_args)
                 if request.future and not request.future.done():
                     request.future.set_result(response)
+        except (Exception, BaseExceptionGroup):
+            logger.exception("MCP worker failed")
         finally:
+            if not ready.done():
+                ready.set_result(False)
             await self._shutdown_worker_resources()
             self._worker_task = None
 
@@ -179,7 +183,13 @@ class RemoteMCPClient:
                     try:
                         if self._exit_stack is not None:
                             await self._exit_stack.aclose()
-                    except (AttributeError, OSError, RuntimeError, TimeoutError, ValueError) as close_exc:
+                    except (
+                        AttributeError,
+                        OSError,
+                        RuntimeError,
+                        TimeoutError,
+                        ValueError,
+                    ) as close_exc:
                         logger.warning("Error closing MCP session: %s", close_exc)
                     finally:
                         self._session = None

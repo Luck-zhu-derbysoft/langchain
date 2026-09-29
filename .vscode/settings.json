@@ -80,6 +80,13 @@
   "python-envs.defaultEnvManager": "ms-python.python:venv",
   "python.analysis.extraPaths": [
     "./libs/core"
+  ],
+  "python-envs.pythonProjects": [
+    {
+      "path": ".",
+      "envManager": "ms-python.python:venv",
+      "packageManager": "ms-python.python:pip"
+    }
   ]
 }
 

@@ -61,7 +61,8 @@ class Retriever:
         self._query_cache: dict[str, list[dict]] = {}  # 简单的查询缓存，避免重复查询同一问题
         self._cache_max_size = 100
         self._cache_lock = RLock()
-    #参考文档:RAG混合检索完整技术文档（Chroma+BM25+Jieba分词+RRF融合）
+
+    # 参考文档:RAG混合检索完整技术文档（Chroma+BM25+Jieba分词+RRF融合）
     def retrieve(
         self,
         query: str,

@@ -206,8 +206,12 @@ class ChatService:
             )
             state.active_agent_id = select_agent.agent_id
             state.assigned_agent_ids.append(select_agent.agent_id)
-
-            cached = await asyncio.to_thread(multi_tier_cache.get, req.query, req.tenant_id)
+            cacheable = intent_classification.category in {"retrieve", "query"}
+            cached = (
+                await asyncio.to_thread(multi_tier_cache.get, req.query, req.tenant_id)
+                if cacheable
+                else None
+            )
             if cached:
                 logger.info("[%s] Cache hit: returning cached answer", request_id)
                 cache_response = ChatResponse(**cached)
@@ -548,9 +552,10 @@ class ChatService:
                 performance_metrics=performance_metrics,
             )
 
-            await asyncio.to_thread(
-                multi_tier_cache.set, req.query, resp.model_dump(), req.tenant_id
-            )
+            if cacheable:
+                await asyncio.to_thread(
+                    multi_tier_cache.set, req.query, resp.model_dump(), req.tenant_id
+                )
 
             self.trace.end_run(
                 ask_run,

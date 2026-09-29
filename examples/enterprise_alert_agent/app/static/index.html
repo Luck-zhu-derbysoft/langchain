@@ -566,7 +566,7 @@
                                     citations.map(c => `[${escapeHtml(c.source_id)}]`).join(' ') +
                                     '</div>';
                             }
-                            botBubble.innerHTML = `${escapeHtml(answerText)}${citationsHtml}`;
+                            botBubble.innerHTML = `${escapeHtml(answerText || String(payload.answer || ''))}${citationsHtml}`;
                             chatBox.scrollTop = chatBox.scrollHeight;
                         } else if (payload.type === 'error') {
                             botBubble.innerHTML = `<span style="color:#c62828">❌ 错误：${escapeHtml(payload.message || '请求失败')}</span>`;
