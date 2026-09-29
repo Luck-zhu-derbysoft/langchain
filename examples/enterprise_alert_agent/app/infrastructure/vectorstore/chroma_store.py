@@ -5,11 +5,10 @@
 - query: 根据查询向量返回最相似的文档
 """
 
-from pydoc import doc
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
-from annotated_types import doc
 import chromadb  # type: ignore[import-untyped]
 from chromadb.config import Settings as ChromaSettings  # type: ignore[import-untyped]
 from langsmith.run_trees import RunTree
@@ -114,7 +113,7 @@ class ChromaStore:
                 #     "metadatas": [[{"source_id":"file1"}, {"source_id":"file2"}]],
                 #     "distances": [[0.21, 0.35]]
                 # }
-                for doc_id,doc, meta, distance in zip(
+                for doc_id, doc, meta, distance in zip(
                     results["ids"][0],
                     results["documents"][0],
                     results["metadatas"][0],
@@ -141,9 +140,10 @@ class ChromaStore:
     def count(self) -> int:
         """返回当前 collection 中的文档总数。"""
         return self._collection.count()
-    def iter_documents(self,*, where: dict[str, Any] | None = None) -> :
-        offset =0
-        page_size=500
+
+    def iter_documents(self, *, where: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
+        offset = 0
+        page_size = 500
         while True:
             page = self._collection.get(
                 where=where,
@@ -153,8 +153,8 @@ class ChromaStore:
             )
             for doc_id, content, meta in zip(
                 page["ids"],
-                page["documents"], # type: ignore
-                page["metadatas"],# type: ignore
+                page["documents"],  # type: ignore
+                page["metadatas"],  # type: ignore
             ):
                 yield {
                     "id": doc_id,

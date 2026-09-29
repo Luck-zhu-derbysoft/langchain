@@ -6,12 +6,12 @@
 
 import json
 import logging
-import re
 import threading
 from copy import deepcopy
 from threading import RLock
 from typing import TYPE_CHECKING, Any
 
+import jieba
 from langsmith import RunTree
 
 from app.config.settings import settings
@@ -61,7 +61,7 @@ class Retriever:
         self._query_cache: dict[str, list[dict]] = {}  # 简单的查询缓存，避免重复查询同一问题
         self._cache_max_size = 100
         self._cache_lock = RLock()
-
+    #参考文档:RAG混合检索完整技术文档（Chroma+BM25+Jieba分词+RRF融合）
     def retrieve(
         self,
         query: str,
@@ -80,7 +80,8 @@ class Retriever:
             tags=["rag", "retriever"],
         )
         where_key = json.dumps(where, sort_keys=True, ensure_ascii=False, default=str)
-        cache_key = f"{query}|{history_text}|{top_k}|{where_key}"
+        store_revision = self._store.count()
+        cache_key = f"{query}|{history_text}|{top_k}|{where_key}|{store_revision}"
         with self._cache_lock:
             cached_docs = self._query_cache.get(cache_key)
             if cached_docs is not None:
@@ -147,29 +148,29 @@ class Retriever:
         return f"{query}\n\n最近上下文:\n{short_history}"
 
     # RAG 混合检索：稠密向量 + BM25（词法） 融合，再用 flashrank 重排
-    def _hybrid_rerank(self, query: str, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        # # 稠密分占比
-        alpha = float(settings.retrieval_hybrid_alpha)
-        lexical_bm25_scores = self._bm25_scores(query, docs)
+    # def _hybrid_rerank(self, query: str, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    #     # # 稠密分占比
+    #     alpha = float(settings.retrieval_hybrid_alpha)
+    #     lexical_bm25_scores = self._bm25_scores(query, docs)
 
-        merged: list[dict[str, Any]] = []
-        for doc, lexical_score in zip(docs, lexical_bm25_scores):
-            dense = float(doc.get("score", 0.0))  # 确保有 score 字段
-            lexical = lexical_score
-            hybrid = alpha * dense + (1 - alpha) * lexical
-            item = dict(doc)
-            item["dense_score"] = dense
-            item["lexical_score"] = lexical
-            item["score"] = hybrid
-            merged.append(item)
-        merged.sort(key=lambda d: d["score"], reverse=True)
-        merged = [mer for mer in merged if mer["score"] > settings.retrieval_min_score]
-        if settings.rerank_enabled and merged:
-            try:
-                merged = self._flashrank_rerank(query, merged)
-            except Exception:
-                logger.warning("flashrank rerank failed, fallback to hybrid score", exc_info=True)
-        return merged
+    #     merged: list[dict[str, Any]] = []
+    #     for doc, lexical_score in zip(docs, lexical_bm25_scores):
+    #         dense = float(doc.get("score", 0.0))  # 确保有 score 字段
+    #         lexical = lexical_score
+    #         hybrid = alpha * dense + (1 - alpha) * lexical
+    #         item = dict(doc)
+    #         item["dense_score"] = dense
+    #         item["lexical_score"] = lexical
+    #         item["score"] = hybrid
+    #         merged.append(item)
+    #     merged.sort(key=lambda d: d["score"], reverse=True)
+    #     merged = [mer for mer in merged if mer["score"] > settings.retrieval_min_score]
+    #     if settings.rerank_enabled and merged:
+    #         try:
+    #             merged = self._flashrank_rerank(query, merged)
+    #         except Exception:
+    #             logger.warning("flashrank rerank failed, fallback to hybrid score", exc_info=True)
+    #     return merged
 
     @staticmethod
     def _tail_turns(history_text: str, max_turns: int) -> str:
@@ -186,20 +187,20 @@ class Retriever:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        return [t for t in re.split(r"\W+", text.lower()) if t]
+        return [token.strip() for token in jieba.lcut(text.lower()) if token.strip()]
 
-    @staticmethod
-    def _bm25_scores(query: str, docs: list[dict[str, Any]]) -> list[float]:
-        if not settings.retrieval_use_bm25 or BM25Okapi is None:
-            return [0.0] * len(docs)
-        corpus = [Retriever._tokenize(str(doc.get("content", ""))) for doc in docs]
-        bm25 = BM25Okapi(corpus)
-        query_token = Retriever._tokenize(query)
-        raw_scores = list(bm25.get_scores(query_token))
-        max_score = max(raw_scores) if raw_scores else 0.0
-        if max_score <= 0.0:
-            return [0.0] * len(docs)
-        return [raw_score / max_score for raw_score in raw_scores]
+    # @staticmethod
+    # def _bm25_scores(query: str, docs: list[dict[str, Any]]) -> list[float]:
+    #     if not settings.retrieval_use_bm25 or BM25Okapi is None:
+    #         return [0.0] * len(docs)
+    #     corpus = [Retriever._tokenize(str(doc.get("content", ""))) for doc in docs]
+    #     bm25 = BM25Okapi(corpus)
+    #     query_token = Retriever._tokenize(query)
+    #     raw_scores = list(bm25.get_scores(query_token))
+    #     max_score = max(raw_scores) if raw_scores else 0.0
+    #     if max_score <= 0.0:
+    #         return [0.0] * len(docs)
+    #     return [raw_score / max_score for raw_score in raw_scores]
 
     @staticmethod
     def _flashrank_rerank(query: str, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -227,6 +228,8 @@ class Retriever:
     def _lexical_search(
         self, query: str, top_k: int = 3, where: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        if not settings.retrieval_use_bm25 or BM25Okapi is None:
+            return []
         documents = list(self._store.iter_documents(where=where))
         query_tokens = self._tokenize(query)
         if not documents or not query_tokens:
@@ -235,12 +238,14 @@ class Retriever:
         if not corpus:
             return []
         scores = BM25Okapi(corpus).get_scores(query_tokens)  # type: ignore
+        query_terms = set(query_tokens)
+        matched = [idx for idx, tokens in enumerate(corpus) if query_terms.intersection(tokens)]
         ranked = sorted(
-            (range(len(documents))),
+            matched,
             key=lambda idx: scores[idx],
             reverse=True,
         )
-        return [documents[idx] for idx in ranked if scores[idx] > 0.0][:top_k]
+        return [documents[idx] for idx in ranked[:top_k]]
 
     @staticmethod
     def _rrf_merge(
