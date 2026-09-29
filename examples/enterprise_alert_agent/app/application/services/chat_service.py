@@ -1165,7 +1165,11 @@ class ChatService:
         Returns:
             TaskDecomposition
         """
-        segments = self._split_query_to_subtasks(query)
+        segments = (
+            [query]
+            if intent_classification.category in {"create", "update", "delete"}
+            else self._split_query_to_subtasks(query)
+        )
         logger.info("Task decomposition: %d subtasks", len(segments))
         if len(segments) <= 1:
             return TaskDecomposition(

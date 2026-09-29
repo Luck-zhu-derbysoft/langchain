@@ -33,7 +33,7 @@ class ProjectLogFilter(logging.Filter):
         return record.name.startswith("app.")
 
 
-class DatePartitionedFileHandler(logging.Handler):
+class CurrentDayFileHandler(logging.Handler):
     def __init__(self, log_root: Path) -> None:
         super().__init__()
         self.log_root = log_root
@@ -42,18 +42,26 @@ class DatePartitionedFileHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            record_date = datetime.fromtimestamp(record.created, tz=UTC_PLUS_8).date().isoformat()
-            if record_date != self._current_date:
+            current_date = datetime.now(tz=UTC_PLUS_8).date().isoformat()
+            if current_date != self._current_date:
                 if self._file_handler is not None:
                     self._file_handler.close()
-                log_directory = self.log_root / record_date
-                log_directory.mkdir(parents=True, exist_ok=True)
+                self.log_root.mkdir(parents=True, exist_ok=True)
+                log_path = self.log_root / "app.log"
+                file_date = (
+                    datetime.fromtimestamp(log_path.stat().st_mtime, tz=UTC_PLUS_8)
+                    .date()
+                    .isoformat()
+                    if log_path.exists()
+                    else None
+                )
                 self._file_handler = logging.FileHandler(
-                    log_directory / "app.log",
+                    log_path,
+                    mode="a" if file_date == current_date else "w",
                     encoding="utf-8",
                 )
                 self._file_handler.setFormatter(self.formatter)
-                self._current_date = record_date
+                self._current_date = current_date
             if self._file_handler is not None:
                 self._file_handler.emit(record)
         except Exception:
@@ -70,7 +78,7 @@ def configure_logging(log_level: str) -> None:
     formatter = JsonFormatter()
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
-    file_handler = DatePartitionedFileHandler(Path(__file__).resolve().parents[2] / "logs")
+    file_handler = CurrentDayFileHandler(Path(__file__).resolve().parents[2] / "logs")
     file_handler.setFormatter(formatter)
     file_handler.addFilter(ProjectLogFilter())
 
