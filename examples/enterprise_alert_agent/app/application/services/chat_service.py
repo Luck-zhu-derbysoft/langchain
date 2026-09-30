@@ -784,6 +784,7 @@ class ChatService:
                 _token_counter=None,
             )
             parsed = _safe_parse_intent_json(str(result or "{}"))
+
             intent_classification = IntentClassification(
                 intent=cast(str, parsed.get("intent", "unknown")),
                 confidence=float(cast(str | float, parsed.get("confidence", 0.0))),
@@ -948,11 +949,34 @@ class ChatService:
             for tool_call in tool_calls:
                 tool_name = tool_call.function.name if tool_call.function else ""
                 tool_args = tool_call.function.arguments if tool_call.function else {}
-                tool_signature = f"{tool_name}:{tool_args}"
+                try:
+                    actual_args = json.loads(tool_args) if isinstance(tool_args, str) else tool_args
+                    if actual_args is None:
+                        actual_args = {}
+                    if not isinstance(actual_args, dict):
+                        raise TypeError("工具参数解析错误，应该是一个 JSON 对象。")
+                except (json.JSONDecodeError, TypeError) as ext:
+                    state.tool_error_count += 1
+                    system_prompt += f"\n\n工具调用结果 ({tool_name}):\n参数无效：{ext}"
+                    system_prompt = self._fit_agent_prompt(system_prompt)
+                    continue
+                canonical_args = json.dumps(
+                    actual_args,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+
+                tool_signature = f"{tool_name}:{canonical_args}"
                 if tool_signature in state.previous_tool_calls:
                     logger.warning("Repeated tool call detected (async): %s", tool_signature[:200])
-                    state.read_only_mode = True
-                    break
+                    system_prompt += (
+                        f"\n\n工具 {tool_name} 使用相同参数已尝试调用过，"
+                        "本次重复调用已跳过。请依据先前结果继续尚未完成的步骤；"
+                        "不要声称被跳过的调用已成功执行。"
+                    )
+                    system_prompt = self._fit_agent_prompt(system_prompt)
+                    continue
                 state.previous_tool_calls.add(tool_signature)
 
                 logger.info("Agent calling tool (async): %s", tool_name)
@@ -966,31 +990,12 @@ class ChatService:
                         logger.warning("Tool failure threshold reached, forcing summary phase")
                     break
 
-                actual_args: dict[str, Any] = {}
                 try:
-                    actual_args = tool_args if isinstance(tool_args, dict) else {}
-                    if isinstance(tool_args, str):
-                        parsed_args = json.loads(tool_args)
-                        if not isinstance(parsed_args, dict):
-                            raise TypeError("工具参数解析错误，应该是一个 JSON 对象。")
-                        actual_args = parsed_args
-                    if not isinstance(actual_args, dict):
-                        raise TypeError("工具参数解析错误，应该是一个 JSON 对象。")
                     result = await self._aapply_tool(skill_map[tool_name], actual_args)
                     tool_summary = self._fit_tool_result(self.tool_result_to_string(result))
                     system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{tool_summary}"
                     system_prompt = self._fit_agent_prompt(system_prompt)
                     logger.debug("tool result (async): %s", tool_summary[:200])
-                except json.JSONDecodeError:
-                    state.tool_error_count += 1
-                    error_msg = "工具调用失败：参数解析错误，不是合法的 JSON 字符串。"
-                    system_prompt += f"\n\n工具调用结果 ({tool_name}):\n{error_msg}"
-                    system_prompt = self._fit_agent_prompt(system_prompt)
-                    logger.warning("%s", error_msg)
-                    if state.tool_error_count >= settings.agent_tool_failure_threshold:
-                        state.read_only_mode = True
-                        logger.warning("Tool failure threshold reached, forcing summary phase")
-                        break
                 except Exception as e:  # noqa: BLE001 - tool execution errors are converted to prompt feedback
                     state.tool_error_count += 1
                     error_msg = f"工具调用失败: {e}"
