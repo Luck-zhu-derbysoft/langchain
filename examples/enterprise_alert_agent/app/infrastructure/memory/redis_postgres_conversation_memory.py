@@ -45,7 +45,7 @@ class MemoryScope:
 @dataclass
 class MemoryContext:
     summary: str
-    recent_turns: list[dict[str, str]]
+    recent_turns: list[dict[str, Any]]
     turn_count: int
 
     def as_prompt_text(self) -> str:
@@ -163,7 +163,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
 
     async def aload_context(self, scope: MemoryScope, *, max_turns: int) -> MemoryContext:
         summary = ""
-        recent_turns: list[dict[str, str]] = []
+        recent_turns: list[dict[str, Any]] = []
         scope_key = self._scope_key(scope)
         # 1) Redis 读（熔断保护）
         self._redis_circuit.before_call()
@@ -174,7 +174,14 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 data = json.loads(cached)
                 return MemoryContext(
                     summary=data.get("summary", ""),
-                    recent_turns=data.get("recent_turns", []),
+                    recent_turns=[
+                        {
+                            "role": row.role,
+                            "content": self._sanitize(row.content),
+                            "metadata": row.metadata_ or {},
+                        }
+                        for row in recent_rows
+                    ],
                     turn_count=data.get("turn_count", 0),
                 )
         except CircuitOpenError:
@@ -303,8 +310,8 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         try:
             cached = await self._redis_client.get(scope_key)
             cache_data = json.loads(cached) if cached else {"summary": "", "recent_turns": []}
-            turns = cast(list[dict[str, str]], cache_data.get("recent_turns", []))
-            turns.append({"role": role, "content": safe_content})
+            turns = cast(list[dict[str, Any]], cache_data.get("recent_turns", []))
+            turns.append({"role": role, "content": safe_content, "metadata": metadata or {}})
             if len(turns) > settings.cache_recent_turns_limit:
                 turns = turns[-settings.cache_recent_turns_limit :]
             cache_data["recent_turns"] = turns

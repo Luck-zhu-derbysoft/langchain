@@ -179,6 +179,50 @@ class ChatService:
                 }
 
         try:
+            catalog_answer = answer_runtime_catalog_query(req.query)
+            if catalog_answer is not None:
+                logger.info(
+                    "[%s] Runtime catalog query detected, answering deterministically",
+                    request_id,
+                )
+                for chunk in _yield_text_chunks(catalog_answer):
+                    yield chunk
+                self.trace.end_run(
+                    ask_run,
+                    outputs={
+                        "request_id": request_id,
+                        "is_multi_task": False,
+                        "failed_task_count": 0,
+                        "answer_mode": "runtime_catalog_direct",
+                    },
+                )
+                yield {
+                    "type": "done",
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                    "answer": catalog_answer,
+                    "citations": [],
+                    "model": settings.model_name,
+                    "intent": "runtime_catalog_query",
+                    "intent_confidence": 1.0,
+                    "selected_tool": None,
+                    "tool_confidence": None,
+                    "fallback_tool": [],
+                    "tool_selection_reason": "Deterministic runtime catalog response",
+                    "task_decomposed": False,
+                    "is_multi_task": False,
+                    "multi_task_results": None,
+                    "failed_tasks": [],
+                    "manual_intervention_required": False,
+                    "retry_count": 0,
+                    "fallback_used": False,
+                    "fallback_strategy": "",
+                    "active_agent_id": "router_agent",
+                    "assigned_agent_ids": ["router_agent"],
+                    "performance_metrics": {},
+                }
+                return
+
             intent_classification, module_activation = await self._aclassify_intent(
                 req.query, self.model_client, parent_run=ask_run
             )
@@ -254,50 +298,6 @@ class ChatService:
                 }
                 return
             self.metrics_collector.record_cache_miss(request_id=request_id)
-
-            catalog_answer = answer_runtime_catalog_query(req.query)
-            if catalog_answer is not None:
-                logger.info(
-                    "[%s] Runtime catalog query detected, answering deterministically",
-                    request_id,
-                )
-                for chunk in _yield_text_chunks(catalog_answer):
-                    yield chunk
-                self.trace.end_run(
-                    ask_run,
-                    outputs={
-                        "request_id": request_id,
-                        "is_multi_task": False,
-                        "failed_task_count": 0,
-                        "answer_mode": "runtime_catalog_direct",
-                    },
-                )
-                yield {
-                    "type": "done",
-                    "request_id": request_id,
-                    "trace_id": trace_id,
-                    "answer": catalog_answer,
-                    "citations": [],
-                    "model": settings.model_name,
-                    "intent": "runtime_catalog_query",
-                    "intent_confidence": 1.0,
-                    "selected_tool": None,
-                    "tool_confidence": None,
-                    "fallback_tool": [],
-                    "tool_selection_reason": "Deterministic runtime catalog response",
-                    "task_decomposed": False,
-                    "is_multi_task": False,
-                    "multi_task_results": None,
-                    "failed_tasks": [],
-                    "manual_intervention_required": False,
-                    "retry_count": 0,
-                    "fallback_used": False,
-                    "fallback_strategy": "",
-                    "active_agent_id": "router_agent",
-                    "assigned_agent_ids": ["router_agent"],
-                    "performance_metrics": {},
-                }
-                return
 
             history_scope = MemoryScope(
                 tenant_id=req.tenant_id,
