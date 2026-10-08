@@ -1,6 +1,12 @@
+import logging
+import secrets
 import sys
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -97,6 +103,23 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def populate_pg_settings_from_checkpoint_dsn(self) -> "Settings":
+        if self.pg_host or not self.langgraph_checkpoint_dsn:
+            return self
+
+        checkpoint_url = make_url(self.langgraph_checkpoint_dsn)
+        if checkpoint_url.get_backend_name() != "postgresql":
+            return self
+
+        self.pg_host = checkpoint_url.host or ""
+        self.pg_port = checkpoint_url.port or self.pg_port
+        self.pg_user = checkpoint_url.username or self.pg_user
+        self.pg_password = checkpoint_url.password or self.pg_password
+        self.pg_db = checkpoint_url.database or self.pg_db
+        return self
+
     # mysql数据库配置
     mysql_host: str = ""
     mysql_port: int = 3306
@@ -159,14 +182,21 @@ class Settings(BaseSettings):
 
 
 def _validate_secrets(s: "Settings") -> None:
+    if s.app_env.lower() == "dev" and not s.admin_jwt_secret:
+        s.admin_jwt_secret = secrets.token_urlsafe(32)
+        logger.warning(
+            "ADMIN_JWT_SECRET is unset; using an ephemeral key for this development process"
+        )
+
     # fail fast if any required secret is missing
     required = {
         "DASHSCOPE_API_KEY": s.dashscope_api_key,
         "ADMIN_JWT_SECRET": s.admin_jwt_secret,
-        "MYSQL_PASSWORD": s.mysql_password,
         "REDIS_PASSWORD": s.redis_password,
         "PG_PASSWORD": s.pg_password,
     }
+    if s.mysql_host:
+        required["MYSQL_PASSWORD"] = s.mysql_password
     missing = [k for k, v in required.items() if not v]
     if missing:
         print(

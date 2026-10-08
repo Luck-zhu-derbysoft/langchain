@@ -7,8 +7,13 @@ import tempfile
 import time
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import Mock, patch
 
-from app.observability.logging_config import CurrentDayFileHandler, JsonFormatter
+from app.observability.logging_config import (
+    CurrentDayFileHandler,
+    JsonFormatter,
+    configure_logging,
+)
 
 
 class TestCurrentDayFileHandler(TestCase):
@@ -41,6 +46,17 @@ class TestCurrentDayFileHandler(TestCase):
                     ["first", "second"],
                 )
             finally:
-                for handler in logger.handlers[:]:
-                    logger.removeHandler(handler)
-                    handler.close()
+                for remaining_handler in logger.handlers[:]:
+                    logger.removeHandler(remaining_handler)
+                    remaining_handler.close()
+
+    def test_openai_retry_logs_are_not_emitted_at_info_level(self) -> None:
+        root_logger = Mock()
+        openai_logger = Mock()
+        with patch(
+            "app.observability.logging_config.logging.getLogger",
+            side_effect=[root_logger, openai_logger],
+        ):
+            configure_logging("INFO")
+
+        openai_logger.setLevel.assert_called_once_with(logging.WARNING)

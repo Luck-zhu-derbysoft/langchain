@@ -87,3 +87,4 @@ def configure_logging(log_level: str) -> None:
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(file_handler)
     root_logger.setLevel(log_level.upper())
+    logging.getLogger("openai._base_client").setLevel(logging.WARNING)

@@ -269,7 +269,6 @@ def create_app() -> FastAPI:
         try:
             replay_owner = f"startup:{uuid.uuid4()}"
             replayable_tasks = await memory.aclaim_replayable_task_states(owner=replay_owner)
-            logger.info("Replayable tasks at startup: %s", replayable_tasks)
             if replayable_tasks:
                 logger.warning("There are replayable tasks at startup.")
                 replay_service = ChatService(

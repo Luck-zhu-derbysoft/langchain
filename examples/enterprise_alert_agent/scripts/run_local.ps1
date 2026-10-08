@@ -14,4 +14,4 @@ if ([string]::IsNullOrWhiteSpace($env:DASHSCOPE_API_KEY)) {
 	Write-Host "DASHSCOPE_API_KEY detected in current shell."
 }
 
-uv run python scripts/run_uvicorn.py
+Write-Host "Local startup is skipped. In VS Code, run the task: Enterprise Alert Agent: Run with uv."

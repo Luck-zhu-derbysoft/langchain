@@ -12,6 +12,7 @@ import redis.asyncio as redis_asyncio
 from redis.exceptions import RedisError
 from sqlalchemy import Table, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_TABLE = cast(Table, vars(ConversationMemorySession)["__table__"])
 TURN_TABLE = cast(Table, vars(ConversationMemoryTurn)["__table__"])
+TASK_TABLE = cast(Table, vars(AgentTaskState)["__table__"])
 
 
 @dataclass(frozen=True)
@@ -97,8 +99,16 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             decode_responses=True,
             socket_connect_timeout=5,
         )
+        pg_url = URL.create(
+            drivername="postgresql+asyncpg",
+            username=settings.pg_user,
+            password=settings.pg_password,
+            host=settings.pg_host,
+            port=settings.pg_port,
+            database=settings.pg_db,
+        )
         self._pg_engine: AsyncEngine = create_async_engine(
-            f"postgresql+asyncpg://{settings.pg_user}:{settings.pg_password}@{settings.pg_host}:{settings.pg_port}/{settings.pg_db}",
+            pg_url,
             pool_size=2,
             max_overflow=8,  # min_size=2, max_size=10 等价拆分
             pool_timeout=5,
@@ -176,11 +186,12 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                     summary=data.get("summary", ""),
                     recent_turns=[
                         {
-                            "role": row.role,
-                            "content": self._sanitize(row.content),
-                            "metadata": row.metadata_ or {},
+                            "role": turn.get("role", ""),
+                            "content": self._sanitize(turn.get("content", "")),
+                            "metadata": turn.get("metadata", {}),
                         }
-                        for row in recent_rows
+                        for turn in data.get("recent_turns", [])
+                        if isinstance(turn, dict)
                     ],
                     turn_count=data.get("turn_count", 0),
                 )
@@ -479,10 +490,10 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
         async with self._apg_session() as session:
             result = await session.execute(
                 select(AgentTaskState).where(
-                    AgentTaskState.request_id == request_id,
-                    AgentTaskState.task_id == task_id,
-                    AgentTaskState.tenant_id == tenant_id,
-                    AgentTaskState.user_id == user_id,
+                    TASK_TABLE.c.request_id == request_id,
+                    TASK_TABLE.c.task_id == task_id,
+                    TASK_TABLE.c.tenant_id == tenant_id,
+                    TASK_TABLE.c.user_id == user_id,
                 )
             )
             return result.scalar_one_or_none()
@@ -492,7 +503,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             result = await session.execute(
                 select(AgentTaskState)
                 .where(
-                    AgentTaskState.status.in_(
+                    TASK_TABLE.c.status.in_(
                         [
                             TaskStatus.QUEUED.value,
                             TaskStatus.RUNNING.value,
@@ -500,7 +511,7 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                         ]
                     )
                 )
-                .order_by(AgentTaskState.created_at)
+                .order_by(TASK_TABLE.c.created_at)
             )
             return list(result.scalars().all())
 
@@ -517,20 +528,20 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
             result = await session.execute(
                 select(AgentTaskState)
                 .where(
-                    AgentTaskState.replayable.is_(True),
-                    AgentTaskState.status.in_(
+                    TASK_TABLE.c.replayable.is_(True),
+                    TASK_TABLE.c.status.in_(
                         [
                             TaskStatus.QUEUED.value,
                             TaskStatus.RUNNING.value,
                         ]
                     ),
-                    AgentTaskState.replay_count < AgentTaskState.max_replay_count,
+                    TASK_TABLE.c.replay_count < TASK_TABLE.c.max_replay_count,
                     or_(
-                        AgentTaskState.lease_expires_at.is_(None),
-                        AgentTaskState.lease_expires_at < now,
+                        TASK_TABLE.c.lease_expires_at.is_(None),
+                        TASK_TABLE.c.lease_expires_at < now,
                     ),
                 )
-                .order_by(AgentTaskState.created_at)
+                .order_by(TASK_TABLE.c.created_at)
                 .limit(limit)
                 .with_for_update(skip_locked=True)
             )
