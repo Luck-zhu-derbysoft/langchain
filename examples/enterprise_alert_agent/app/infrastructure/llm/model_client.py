@@ -61,6 +61,7 @@ class ModelClient:
         self._validate_input_budget(user_query, system_prompt, tools)
         try:
             completion = None
+            last_error: Exception | None = None
             for provider, model_name in candidates:
                 _async_client = self._async_client_map.get(provider)
                 if _async_client is None:
@@ -88,6 +89,7 @@ class ModelClient:
                     except AuthenticationError:
                         raise
                     except Exception as exc:
+                        last_error = exc
                         self._circuit_breaker.record_failure()
                         if not self._classify_error(exc):
                             raise
@@ -101,8 +103,12 @@ class ModelClient:
                 if completion is not None:
                     break
             if completion is None:
-                raise ModelRequestError("Model request failed after retries and fallback attempts.")
+                message = "Model request failed after retries and fallback attempts."
+                if last_error is not None:
+                    message = f"{message} Last error: {type(last_error).__name__}: {last_error}"
+                raise ModelRequestError(message) from last_error
             message = completion.choices[0].message
+            message_content = getattr(message, "content", None) or ""
             usage = getattr(completion, "usage", None)
             if usage is not None and _token_counter is not None:
                 _token_counter[0] += (
@@ -111,12 +117,12 @@ class ModelClient:
                 if _token_counter[0] >= settings.max_tokens_per_request:
                     raise BudgetExceededError("Model request exceeds the maximum token limit.")
             outputs = {
-                "answer_length": len(message.content or ""),
+                "answer_length": len(message_content),
                 "model": completion.model or selected_model,
                 "total_tokens": getattr(usage, "total_tokens", 0) if usage else 0,
             }
             self._tracer.end_run(llm_run, outputs=outputs)
-            return message if return_message else message.content or ""
+            return message if return_message else message_content
         except CircuitOpenError as exc:
             self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
             raise ModelRequestError("LLM circuit is open") from exc
@@ -125,7 +131,7 @@ class ModelClient:
             raise ModelAuthError("Model authentication failed") from exc
         except (APIConnectionError, APIError) as exc:
             self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-            raise ModelRequestError("Model request failed") from exc
+            raise ModelRequestError(f"Model request failed: {type(exc).__name__}: {exc}") from exc
         except BudgetExceededError as exc:
             self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
             raise

@@ -32,7 +32,6 @@ async def async_init_mcp() -> bool:
             logger.warning("MCP initialize failed: %s", settings.mcp_service_url)
             _mcp_client = None
             return False
-        logger.info("MCP initialized successfully")
         return True
     # 分层捕获异常，精细化日志
     except TimeoutError:

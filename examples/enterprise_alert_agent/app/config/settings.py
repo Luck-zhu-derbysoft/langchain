@@ -2,7 +2,7 @@ import logging
 import secrets
 import sys
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -21,7 +21,10 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     model_name: str = "qwen-plus"
     fallback_model_name: str = "qwen-turbo"  # 主模型失败后的降级模型
-    dashscope_base_url: str = ""
+    dashscope_base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("DASHSCOPE_BASE_URL", "BASE_URL"),
+    )
     # 多 provider 配置
     openai_api_key: str = "213"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -102,6 +105,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     @model_validator(mode="after")

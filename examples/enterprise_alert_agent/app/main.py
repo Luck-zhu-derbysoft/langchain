@@ -401,8 +401,8 @@ def create_app() -> FastAPI:
             msg = "model auth failed during startup probe"
             app.state.model_check_message = msg
             logger.warning(msg)
-        except ModelRequestError:
-            msg = "model request failed during startup probe"
+        except ModelRequestError as exc:
+            msg = f"model request failed during startup probe: {exc}"
             app.state.model_check_message = msg
             logger.warning(msg)
 

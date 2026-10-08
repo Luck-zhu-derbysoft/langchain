@@ -71,3 +71,9 @@ def test_postgres_settings_are_loaded_from_checkpoint_dsn() -> None:
     assert settings.pg_user == "db-user"
     assert settings.pg_password == "p@ssword"
     assert settings.pg_db == "db-name"
+
+
+def test_dashscope_base_url_accepts_base_url_alias() -> None:
+    settings = Settings.model_validate({"BASE_URL": "https://model.example/v1"})
+
+    assert settings.dashscope_base_url == "https://model.example/v1"

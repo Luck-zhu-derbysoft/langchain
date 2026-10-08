@@ -52,11 +52,17 @@ class TestCurrentDayFileHandler(TestCase):
 
     def test_openai_retry_logs_are_not_emitted_at_info_level(self) -> None:
         root_logger = Mock()
-        openai_logger = Mock()
+        loggers = {
+            "openai._base_client": Mock(),
+            "httpx": Mock(),
+            "mcp": Mock(),
+            "uvicorn.access": Mock(),
+        }
         with patch(
             "app.observability.logging_config.logging.getLogger",
-            side_effect=[root_logger, openai_logger],
+            side_effect=lambda name=None: root_logger if name is None else loggers[name],
         ):
             configure_logging("INFO")
 
-        openai_logger.setLevel.assert_called_once_with(logging.WARNING)
+        for logger in loggers.values():
+            logger.setLevel.assert_called_once_with(logging.WARNING)
