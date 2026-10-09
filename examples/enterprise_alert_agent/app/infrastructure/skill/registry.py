@@ -37,6 +37,7 @@ class SkillRegistry:
                 "metadata": descriptor.metadata,
             }
             for descriptor in self._registry.values()
+            if descriptor.enabled
         ]
 
     # key = 工具名，value 是可 await 的函数。

@@ -13,7 +13,10 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langsmith.run_trees import RunTree
 
 from app.application.services.runtime_catalog_responder import (
-    answer_if_matched as answer_runtime_catalog_query,
+    answer_with_history as answer_runtime_catalog_query,
+)
+from app.application.services.runtime_catalog_responder import (
+    is_followup_query,
 )
 from app.config.dynamic_settings import ConfigManager
 from app.config.settings import settings
@@ -179,13 +182,69 @@ class ChatService:
                 }
 
         try:
-            catalog_answer = answer_runtime_catalog_query(req.query)
+            history_scope = MemoryScope(
+                tenant_id=req.tenant_id,
+                user_id=req.user_id,
+                thread_id=req.thread_id,
+            )
+            previously_listed_ids: set[str] | None = None
+            if is_followup_query(req.query):
+                memory_context = await self.memory.aload_context(
+                    history_scope,
+                    max_turns=5,
+                )
+                last_assistant_turn = next(
+                    (
+                        turn
+                        for turn in reversed(memory_context.recent_turns)
+                        if turn.get("role") == "assistant"
+                    ),
+                    None,
+                )
+                if last_assistant_turn is not None:
+                    metadata = last_assistant_turn.get("metadata") or {}
+                else:
+                    metadata = {}
+                if metadata.get("runtime_catalog"):
+                    previously_listed_ids = {
+                        str(item) for item in metadata.get("capability_ids", [])
+                    }
+            catalog_answer = answer_runtime_catalog_query(
+                req.query,
+                previously_listed_ids=previously_listed_ids,
+                agent_registry=self.agent_registry,
+            )
             if catalog_answer is not None:
+                listed_ids = set(previously_listed_ids or ())
+                listed_ids.update(catalog_answer.capability_ids)
+                try:
+                    await self.memory.aappend_turn(
+                        history_scope,
+                        role="user",
+                        content=req.query,
+                        metadata={"request_id": request_id},
+                    )
+                    await self.memory.aappend_turn(
+                        history_scope,
+                        role="assistant",
+                        content=catalog_answer.text,
+                        metadata={
+                            "request_id": request_id,
+                            "runtime_catalog": True,
+                            "capability_ids": sorted(listed_ids),
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "[%s] Failed to persist runtime catalog conversation",
+                        request_id,
+                    )
+
                 logger.info(
                     "[%s] Runtime catalog query detected, answering deterministically",
                     request_id,
                 )
-                for chunk in _yield_text_chunks(catalog_answer):
+                for chunk in _yield_text_chunks(catalog_answer.text):
                     yield chunk
                 self.trace.end_run(
                     ask_run,
@@ -200,7 +259,7 @@ class ChatService:
                     "type": "done",
                     "request_id": request_id,
                     "trace_id": trace_id,
-                    "answer": catalog_answer,
+                    "answer": catalog_answer.text,
                     "citations": [],
                     "model": settings.model_name,
                     "intent": "runtime_catalog_query",
@@ -860,7 +919,7 @@ class ChatService:
         mcp_tool_map: dict[str, SkillFunc],
         tool_selection: ToolSelection | None = None,
     ) -> str:
-        capabilities = get_runtime_capabilities()
+        capabilities = get_runtime_capabilities(self.agent_registry)
         runtime_catalog = json.dumps(
             [capability.to_dict() for capability in capabilities],
             ensure_ascii=False,
@@ -1055,7 +1114,7 @@ class ChatService:
         # )
         tool_candidates = [
             capability.to_dict()
-            for capability in get_runtime_capabilities()
+            for capability in get_runtime_capabilities(agent_registry=self.agent_registry)
             if capability.kind == "tool"
         ]
         tools_str = "\n".join(

@@ -238,7 +238,12 @@ class RedisPostgresConversationMemoryStore(PersistentConversationMemoryStore):
                 )
             )
             recent_turns = [
-                {"role": row.role, "content": self._sanitize(row.content)} for row in recent_rows
+                {
+                    "role": row.role,
+                    "content": self._sanitize(row.content),
+                    "metadata": row.metadata_ or {},
+                }
+                for row in recent_rows
             ]
 
         # 3) 回写 Redis 缓存（熔断保护）

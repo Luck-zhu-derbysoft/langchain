@@ -112,3 +112,7 @@ def _make_async_remote_tool_func(mcp_client: RemoteMCPClient, tool_name: str):
         return await mcp_client.call_tool(tool_name, kwargs)
 
     return tool_function
+
+
+def is_mcp_initialized() -> bool:
+    return _mcp_client is not None and _mcp_client._initialized

@@ -6,6 +6,9 @@ the runtime capability catalog). Queries that ask about registered services/tool
 are therefore answered deterministically from `get_runtime_capabilities()`.
 """
 
+from dataclasses import dataclass
+
+from app.infrastructure.agent.agent_registry import AgentRegistry
 from app.infrastructure.capabilities.runtime_catalog import (
     RuntimeCapability,
     get_runtime_capabilities,
@@ -52,8 +55,7 @@ def render(capabilities: list[RuntimeCapability]) -> str:
     lines = ["当前已注册的运行时能力如下（来自运行时能力目录，非知识库推断）："]
 
     for service in services:
-        endpoint = f"（{service.endpoint}）" if service.endpoint else ""
-        lines.append(f"- 服务: {service.name} [{service.provider}]{endpoint}")
+        lines.append(f"- 服务: {service.name} [{service.provider}]")
 
     for tool in tools:
         description = f"：{tool.description}" if tool.description else ""
@@ -76,7 +78,70 @@ def render(capabilities: list[RuntimeCapability]) -> str:
     return "\n".join(lines)
 
 
-def answer_if_matched(query: str) -> str | None:
-    if not matches(query):
+def answer_if_matched(query: str, *, agent_registry: AgentRegistry | None = None) -> str | None:
+    answer = answer_with_history(query, previously_listed_ids=None, agent_registry=agent_registry)
+    return answer.text if answer is not None else None
+
+
+@dataclass(frozen=True)
+class RuntimeCatalogAnswer:
+    text: str
+    capability_ids: list[str]
+
+
+_FOLLOWUP_WORDS = (
+    "除了",
+    "除此之外",
+    "除上面",
+    "除以上",
+    "除刚才",
+    "其他",
+    "还有",
+)
+
+
+def is_followup_query(query: str) -> bool:
+    normalized = (query or "").strip().lower()
+    return any(word in normalized for word in _FOLLOWUP_WORDS)
+
+
+def _capability_id(capability: RuntimeCapability) -> str:
+    return f"{capability.provider}:{capability.kind}:{capability.name}"
+
+
+def answer_with_history(
+    query: str,
+    *,
+    previously_listed_ids: set[str] | None,
+    agent_registry: AgentRegistry | None = None,
+) -> RuntimeCatalogAnswer | None:
+    normalized = (query or "").strip().lower()
+    has_resource_context = any(word in normalized for word in _RESOURCE_WORDS)
+    is_followup = is_followup_query(query) and (
+        previously_listed_ids is not None or has_resource_context
+    )
+
+    if previously_listed_ids is None and is_followup:
+        return RuntimeCatalogAnswer(
+            text="当前会话中找不到上一条能力清单，请先询问当前已注册的工具。",
+            capability_ids=[],
+        )
+    if not matches(query) and not is_followup:
         return None
-    return render(get_runtime_capabilities())
+    capabilities = get_runtime_capabilities(agent_registry=agent_registry)
+    if is_followup:
+        capabilities = [
+            cap
+            for cap in capabilities
+            if _capability_id(cap) not in previously_listed_ids  # type: ignore
+        ]
+    if not capabilities and is_followup:
+        return RuntimeCatalogAnswer(
+            text="当前能力目录没有其他尚未列出的运行时能力。",
+            capability_ids=[],
+        )
+
+    return RuntimeCatalogAnswer(
+        text=render(capabilities),
+        capability_ids=[_capability_id(item) for item in capabilities],
+    )
