@@ -35,7 +35,7 @@
 ### 4. RAG 知识层（加分1/4 + 文档4）
 | 混合检索 / 重排 | ✅ 向量候选 + BM25 融合 + FlashRank 重排；
 | 向量库对比（Chroma/Qdrant/Milvus） | ✅ Chroma | Qdrant 跑通对比 | 🟡 |
-| RAG 评估 | ⚠️ 无自动化 | Golden Set 脚本 | 🟠 |
+(已修复)| RAG 评估 | ✅ 独立检索 Golden Set + Hit@K/Recall@K/MRR/nDCG + CI 阈值门禁 | 持续扩充困难样本并监控指标波动 | 🟠 |
 | 知识图谱 / GraphRAG | ❌ 无 | 最小实体关系图 | 🟢 |
 | Fine-tuning / Hugging Face | ❌ 无 | HF 本地推理 demo | 🟢 |
 |这个项目没有用 FastAPI 的 Depends() 做单例生命周期管理，而是在 create_app() 里手动构造好所有单例对象，塞进 app.state.shared_dependencies，请求级的 Depends(_get_chat_service) 只是从这个字典里取出单例、拼装出一个请求级的 ChatService 门面对象
@@ -103,6 +103,7 @@
 - 幂等：**SETNX + 幂等键，重试不重放**
 - 技能生态：**注册表驱动，新技能零改主流程**
 - 状态机：**任务状态持久化，崩溃可恢复**
-- 评估：**Golden Set 驱动回归测试，LLM-as-judge 评分，代码强制校验分数和工具选择，接入 CI 门禁**
+- Agent 评估：**Golden Set 驱动端到端回归，LLM-as-judge 评分，强制校验回答、工具选择和引用来源**
+- RAG 评估：**检索 Golden Set 衡量 Hit@K、Recall@K、MRR、nDCG，并以固定阈值接入 CI 门禁**
 - 安全：**无凭证不签发、密钥不落地、审计不可篡改**
 - LangGraph：**只图化核心复杂链路**

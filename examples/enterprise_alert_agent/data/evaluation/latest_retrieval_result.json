@@ -1,0 +1,73 @@
+{
+  "metrics": {
+    "hit_rate": 1.0,
+    "recall": 1.0,
+    "mrr": 1.0,
+    "ndcg": 1.0
+  },
+  "thresholds": {
+    "hit_rate": 0.8,
+    "recall": 0.8,
+    "mrr": 0.75,
+    "ndcg": 0.75
+  },
+  "failures": [],
+  "cases": [
+    {
+      "id": "retrieval-001",
+      "retrieved_ids": [
+        "rag-doc-001",
+        "rag-doc-004",
+        "rag-doc-002"
+      ],
+      "metrics": {
+        "hit_rate": 1.0,
+        "recall": 1.0,
+        "mrr": 1.0,
+        "ndcg": 1.0
+      }
+    },
+    {
+      "id": "retrieval-002",
+      "retrieved_ids": [
+        "rag-doc-002",
+        "rag-doc-001",
+        "rag-doc-004"
+      ],
+      "metrics": {
+        "hit_rate": 1.0,
+        "recall": 1.0,
+        "mrr": 1.0,
+        "ndcg": 1.0
+      }
+    },
+    {
+      "id": "retrieval-003",
+      "retrieved_ids": [
+        "rag-doc-003",
+        "rag-doc-001",
+        "rag-doc-002"
+      ],
+      "metrics": {
+        "hit_rate": 1.0,
+        "recall": 1.0,
+        "mrr": 1.0,
+        "ndcg": 1.0
+      }
+    },
+    {
+      "id": "retrieval-004",
+      "retrieved_ids": [
+        "rag-doc-004",
+        "rag-doc-001",
+        "rag-doc-002"
+      ],
+      "metrics": {
+        "hit_rate": 1.0,
+        "recall": 1.0,
+        "mrr": 1.0,
+        "ndcg": 1.0
+      }
+    }
+  ]
+}

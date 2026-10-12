@@ -6,7 +6,9 @@ on:
       - "examples/enterprise_alert_agent/app/**"
       - "examples/enterprise_alert_agent/data/evaluation/**"
       - "examples/enterprise_alert_agent/scripts/evaluate_agent.py"
+      - "examples/enterprise_alert_agent/scripts/evaluate_retrieval.py"
       - "examples/enterprise_alert_agent/tests/unit/test_agent_evaluation.py"
+      - "examples/enterprise_alert_agent/tests/unit/test_retrieval_evaluation.py"
       - "examples/enterprise_alert_agent/docker-compose.yml"
       - "examples/enterprise_alert_agent/Dockerfile"
       - ".github/workflows/enterprise_agent_evaluation.yml"
@@ -79,6 +81,15 @@ jobs:
             "ADMIN_API_KEY=${EVAL_AUTH_API_KEY}" \
             "ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET}" > .env
 
+      - name: Run retrieval evaluation
+        working-directory: ${{ env.WORKDIR }}
+        run: >-
+          uv run python scripts/evaluate_retrieval.py
+          --min-hit-rate 0.80
+          --min-recall 0.80
+          --min-mrr 0.75
+          --min-ndcg 0.75
+
       - name: Start Agent and dependencies
         working-directory: ${{ env.WORKDIR }}
         run: docker compose up -d --build
@@ -122,7 +133,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: enterprise-agent-evaluation-${{ github.run_id }}
-          path: ${{ env.WORKDIR }}/data/evaluation/latest_result.json
+          path: |
+            ${{ env.WORKDIR }}/data/evaluation/latest_result.json
+            ${{ env.WORKDIR }}/data/evaluation/latest_retrieval_result.json
           if-no-files-found: ignore
 
       - name: Show Agent logs on failure

@@ -1,0 +1,50 @@
+{
+  "corpus": [
+    {
+      "id": "rag-doc-001",
+      "content": "值班告警连续失败 3 次后，必须升级到二线处理。",
+      "metadata": {"source_id": "oncall-policy"}
+    },
+    {
+      "id": "rag-doc-002",
+      "content": "P1 告警要求值班人员在 5 分钟内响应。",
+      "metadata": {"source_id": "severity-policy"}
+    },
+    {
+      "id": "rag-doc-003",
+      "content": "Redis Stream 消费积压超过 1000 条时，应检查消费者组和 pending 列表。",
+      "metadata": {"source_id": "redis-runbook"}
+    },
+    {
+      "id": "rag-doc-004",
+      "content": "数据库凭证和 API Key 必须通过密钥管理系统定期轮换。",
+      "metadata": {"source_id": "security-policy"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "retrieval-001",
+      "query": "告警连续失败多少次需要找二线？",
+      "relevant_doc_ids": ["rag-doc-001"],
+      "top_k": 3
+    },
+    {
+      "id": "retrieval-002",
+      "query": "P1 级别的告警需要在多长时间内响应？",
+      "relevant_doc_ids": ["rag-doc-002"],
+      "top_k": 3
+    },
+    {
+      "id": "retrieval-003",
+      "query": "Redis Stream 消费积压超过 1000 条时应该检查什么？",
+      "relevant_doc_ids": ["rag-doc-003"],
+      "top_k": 3
+    },
+    {
+      "id": "retrieval-004",
+      "query": "系统密钥应该怎样管理？",
+      "relevant_doc_ids": ["rag-doc-004"],
+      "top_k": 3
+    }
+  ]
+}

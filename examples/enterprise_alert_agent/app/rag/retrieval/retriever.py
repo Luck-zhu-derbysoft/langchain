@@ -210,7 +210,7 @@ class Retriever:
             return docs
         try:
             passages = [
-                {"id": str(idx), "content": doc.get("content", "")} for idx, doc in enumerate(docs)
+                {"id": str(idx), "text": doc.get("content", "")} for idx, doc in enumerate(docs)
             ]
             rerank_request = RerankRequest(
                 query=query,
