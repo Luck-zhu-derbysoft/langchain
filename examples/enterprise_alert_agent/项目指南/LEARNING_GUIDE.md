@@ -37,7 +37,8 @@
 | 向量库对比（Chroma/Qdrant/Milvus） | ✅ Chroma | Qdrant 跑通对比 | 🟡 |
 (已修复)| RAG 评估 | ✅ 独立检索 Golden Set + Hit@K/Recall@K/MRR/nDCG + CI 阈值门禁 | 持续扩充困难样本并监控指标波动 | 🟠 |
 | 知识图谱 / GraphRAG | ❌ 无 | 最小实体关系图 | 🟢 |
-| Fine-tuning / Hugging Face | ❌ 无 | HF 本地推理 demo | 🟢 |
+(已修复)| Hugging Face 本地推理 | ✅ Transformers + Qwen 本地推理 demo，并有无模型下载单测 | 对接统一模型路由并记录延迟/内存 | 🟢 |
+| Fine-tuning（LoRA/SFT） | ❌ 未实现 | 准备告警领域数据集，使用 PEFT/TRL 训练并评估 | 🟢 |
 |这个项目没有用 FastAPI 的 Depends() 做单例生命周期管理，而是在 create_app() 里手动构造好所有单例对象，塞进 app.state.shared_dependencies，请求级的 Depends(_get_chat_service) 只是从这个字典里取出单例、拼装出一个请求级的 ChatService 门面对象
 
 ### 5. 弹性与高并发（核心3 + 文档5）
