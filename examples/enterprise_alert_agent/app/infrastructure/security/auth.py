@@ -109,3 +109,30 @@ def require_roles(*roles: Role):
         return token_data
 
     return role_checker
+
+
+def get_rate_limit_identity(token: str) -> str | None:
+    """Return a stable identity for rate limiting from a verified token.
+
+    Args:
+        token: Encoded JWT access token.
+
+    Returns:
+        A tenant-scoped user identity, or `None` when the token or claims are invalid.
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            settings.admin_jwt_secret,
+            algorithms=[settings.admin_jwt_algorithm],
+        )
+    except jwt.PyJWTError:
+        return None
+
+    tenant_id = payload.get("tenant_id")
+    user_id = payload.get("sub")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        return None
+    if not isinstance(user_id, str) or not user_id:
+        return None
+    return f"tenant:{tenant_id}:user:{user_id}"

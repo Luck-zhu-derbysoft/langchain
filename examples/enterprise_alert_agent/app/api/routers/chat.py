@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.application.services.chat_service import ChatService
+from app.config.settings import settings
 from app.infrastructure.agent.a2a_protocol import ManualInterventionRequest
 from app.infrastructure.memory.redis_postgres_conversation_memory import MemoryScope
 from app.infrastructure.security.auth import TokenPayload, require_auth
@@ -62,7 +63,7 @@ def _get_chat_service(request: Request) -> ChatService:
 
 
 @router.post("/stream")
-@limiter.limit("10/minute")
+@limiter.limit(settings.rate_limit_chat)
 async def chat_stream(
     request: Request,
     req: ChatRequest,
@@ -136,6 +137,7 @@ async def chat_stream(
 
 
 @router.post("/memory/clear")
+@limiter.limit(settings.rate_limit_write)
 async def clear_memory(
     request: Request,
     req: ClearRequest,
@@ -294,7 +296,9 @@ async def acknowledge_alert(
 
 
 @router.get("/metrics/{request_id}")
+@limiter.limit(settings.rate_limit_read)
 async def get_metrics(
+    request: Request,
     request_id: str,
     service: Annotated[ChatService, Depends(_get_chat_service)],
     _auth: Annotated[TokenPayload, Depends(require_auth)],

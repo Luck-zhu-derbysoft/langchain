@@ -183,6 +183,10 @@ class Settings(BaseSettings):
     circuit_breaker_recovery_seconds: float = 30.0
     alert_webhook_url: str = ""
     alert_webhook_timeout_seconds: float = 5.0
+    rate_limit_storage_uri: str = "memory://"
+    rate_limit_chat: str = "10/minute"
+    rate_limit_write: str = "5/minute"
+    rate_limit_read: str = "30/minute"
 
 
 def _validate_secrets(s: "Settings") -> None:

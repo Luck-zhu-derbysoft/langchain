@@ -42,6 +42,7 @@ from app.infrastructure.memory.redis_postgres_conversation_memory import (
     RedisPostgresConversationMemoryStore,
 )
 from app.infrastructure.queue.redis_stream import RedisStreamWorker
+from app.infrastructure.security.auth import get_rate_limit_identity
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.observability.alert_manager import alert_manager
 from app.observability.alert_types import AlertSeverity, AlertTypes
@@ -57,17 +58,16 @@ from app.rag.retrieval.retriever import Retriever
 from app.schemas.ingest import IngestTextRequest
 
 
-def get_user_rate_limit_key(request) -> str:
+def get_user_rate_limit_key(request: Request) -> str:
     """按用户/租户维度限流，降级回 IP。"""
-    try:
-        # 尝试从 Authorization token 中提取用户标识
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            # 简化：用 token 前 20 字符作为用户 key
-            return f"user:{token[:20]}"
-    except Exception:
-        logger.exception("Failed to extract user key")
+    # 尝试从 Authorization token 中提取用户标识
+    auth_header = request.headers.get("Authorization", "")
+    scheme, _, token = auth_header.partition(" ")
+    if scheme.lower() == "bearer" and token:
+        user_key = get_rate_limit_identity(token)
+        if user_key:
+            return user_key
+
     # 降级为 IP 限流
     return f"ip:{get_remote_address(request)}"
 
@@ -77,7 +77,13 @@ request_semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
 logger = logging.getLogger(__name__)
 
 
-limiter = Limiter(key_func=get_user_rate_limit_key)
+limiter = Limiter(
+    key_func=get_user_rate_limit_key,
+    storage_uri=settings.rate_limit_storage_uri,
+    in_memory_fallback_enabled=True,
+    swallow_errors=False,
+    key_prefix=f"{settings.app_name}:",
+)
 
 
 def create_app() -> FastAPI:
@@ -103,7 +109,17 @@ def create_app() -> FastAPI:
         try:
             await asyncio.wait_for(request_semaphore.acquire(), timeout=1.0)
         except TimeoutError:
-            return JSONResponse(status_code=429, content={"detail": "服务当前繁忙，请稍后重试"})
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "code": "SERVICE_OVERLOADED",
+                        "message": "服务当前繁忙，请稍后重试",
+                        "retryable": True,
+                    }
+                },
+                headers={"Retry-After": "1"},
+            )
         try:
             return await call_next(request)
         finally:
@@ -239,9 +255,28 @@ def create_app() -> FastAPI:
             },
         )
 
-    @app.exception_handler(RateLimitExceeded)
-    async def rate_limit_handler(request, exc):
-        return JSONResponse(status_code=429, content={"detail": "请求过于频繁，请稍后再试"})
+    def rate_limit_handler(_request: Request, exc: Exception) -> Response:
+        if not isinstance(exc, RateLimitExceeded):
+            raise TypeError("Expected RateLimitExceeded")
+        if exc.limit is None:
+            raise RuntimeError("Rate limit details are unavailable")
+        limit = exc.limit.limit
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": "请求过于频繁，请稍后再试",
+                    "retryable": True,
+                }
+            },
+            headers={
+                "Retry-After": str(limit.get_expiry()),
+                "X-RateLimit-Limit": str(limit.amount),
+            },
+        )
+
+    app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
     @app.on_event("startup")
     async def startup_checks() -> None:
