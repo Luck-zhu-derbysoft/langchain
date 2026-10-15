@@ -39,9 +39,7 @@
 | 知识图谱 / GraphRAG | ❌ 无 | 最小实体关系图 | 🟢 |
 (已修复)| Hugging Face 本地推理 | ✅ Transformers + Qwen 本地推理 demo，并有无模型下载单测 | 对接统一模型路由并记录延迟/内存 | 🟢 |
 | Fine-tuning（LoRA/SFT） | ❌ 未实现 | 准备告警领域数据集，使用 PEFT/TRL 训练并评估 | 🟢 |
-> **依赖注入与资源生命周期（现状合理，并非缺陷）**：共享资源由 `create_app()` 按应用实例创建并存入 `app.state.shared_dependencies`，`Depends(_get_chat_service)` 在请求处理中复用这些资源并组装请求级 `ChatService`。`Depends()` 默认保证的是单次请求内的依赖复用，不负责跨请求的全局单例生命周期。
->
-> **可选优化**：后续可使用类型化依赖容器替代字符串键字典，并迁移到 FastAPI `lifespan` 统一管理资源的初始化和关闭；无需仅为“使用 `Depends()` 做单例”而改造现有代码。
+(已确认)| 依赖注入 / 资源生命周期 | ✅ `create_app()` 管理应用级共享资源，`Depends(_get_chat_service)` 组装请求级服务 | 可选：类型化依赖容器 + FastAPI `lifespan` | 🟡 |
 
 ### 5. 弹性与高并发（核心3 + 文档5）
 | 熔断 / 背压 / 优雅停机 | ✅ 已全做 | 复盘状态机 | 🟡 |
