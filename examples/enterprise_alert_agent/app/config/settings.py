@@ -31,10 +31,14 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-3-5-sonnet-20241022"
-    request_timeout_seconds: int = 30
+    request_timeout_seconds: int = 30  # 单次请求读取超时
+    connect_timeout_seconds: float = 3.0  # 建立连接超时
     model_startup_probe_enabled: bool = True
     model_max_retries: int = 2
     model_retry_backoff_seconds: float = 0.5
+    model_retry_backoff_cap_seconds: float = 8.0
+    model_total_deadline_seconds: float = 45.0  # 主备模型及所有重试的总时间
+    stream_idle_timeout_seconds: float = 20.0  # 流式响应相邻分片的最大等待时间
     agent_tool_failure_threshold: int = 2  # 工具连续失败超过此数降级为纯 RAG
     # ========================================================
     # 🚀 新增：Agentic & Function Calling 配置（提升含金量核心）
@@ -47,6 +51,7 @@ class Settings(BaseSettings):
     reflection_min_score: float = 0.8  # 反思通过的最低分数
     task_max_retries: int = 2
     task_initial_backoff_seconds: float = 0.5
+    task_retry_backoff_cap_seconds: float = 5.0
     task_max_workers: int = 4
     task_timeout_seconds: int = 20
     enable_fallback_chain: bool = True
@@ -160,8 +165,10 @@ class Settings(BaseSettings):
     # --- MCP 配置 ---
     mcp_service_url: str = ""
     mcp_enabled: bool = True
-    mcp_connect_timeout_seconds: float = 30.0  # 建立会话/握手超时
+    mcp_connect_timeout_seconds: float = 5.0  # 建立会话/握手超时
     mcp_call_timeout_seconds: float = 60.0  # 单次工具调用超时
+    mcp_max_attempts: int = 2
+    mcp_idempotent_tools: list[str] = Field(default_factory=list)
     mcp_api_key: str = ""
     mcp_cookie: str = ""
     # ========== 故障诊断配置==========

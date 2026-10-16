@@ -11,6 +11,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 
 from app.config.settings import settings
 from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
+from app.infrastructure.fault.retry_policy import backoff_delay
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,17 @@ class RemoteMCPClient:
                 request = await self._queue.get()
                 if request is None:
                     break
-                response = await self._handle_request(request.tool_name, request.tool_args)
+                try:
+                    response = await self._handle_request(request.tool_name, request.tool_args)
+                except Exception as exc:
+                    logger.exception("MCP request crashed: tool=%s", request.tool_name)
+                    response = {
+                        "status": "error",
+                        "data": [],
+                        "row_count": 0,
+                        "error_code": "mcp_internal_error",
+                        "message": str(exc),
+                    }
                 if request.future and not request.future.done():
                     request.future.set_result(response)
         except (Exception, BaseExceptionGroup):
@@ -123,80 +134,48 @@ class RemoteMCPClient:
             self._worker_task = None
 
     async def _handle_request(
-        self, tool_name: str, tool_args: dict[str, Any], *, max_attempts: int = 2
+        self, tool_name: str, tool_args: dict[str, Any], *, max_attempts: int | None = None
     ) -> dict[str, Any]:
+        max_attempts = max_attempts or settings.mcp_max_attempts
+        retry_safe = tool_name in settings.mcp_idempotent_tools
+        last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
-            session = self._session
+            request_sent = False
             try:
+                session = self._session
                 if session is None or self._exit_stack is None:
-                    conn = await self._do_connect()
-                    if not conn:
-                        raise RuntimeError("Failed to connect to MCP server")
+                    if not await self._do_connect() or not self._session:
+                        raise ConnectionError("Failed to connect to MCP server")
                     session = self._session
-                    if session is None:
-                        raise RuntimeError("MCP session was not created")
-                logger.info("MCP call start: tool=%s attempt=%d", tool_name, attempt)
-
+                request_sent = True  # 从这里开始，服务端可能已经执行了工具
                 result = await asyncio.wait_for(
                     session.call_tool(name=tool_name, arguments=tool_args),
                     timeout=settings.mcp_call_timeout_seconds,
                 )
-                logger.info("MCP call completed: tool=%s", tool_name)
-                content = result.content
-                if isinstance(content, list) and content:
-                    texts = [
-                        getattr(item, "text", str(item)) for item in content if item is not None
-                    ]
-                    return {
-                        "status": "success",
-                        "data": [{"result": "\n".join(texts)}],
-                        "row_count": len(content),
-                        "error_code": "",
-                        "message": "ok",
-                    }
-                return {
-                    "status": "success",
-                    "data": [],
-                    "row_count": 0,
-                    "error_code": "",
-                    "message": "ok",
-                }
+                return self._format_tool_result(result)
             except (
                 AttributeError,
-                ConnectionError,
-                OSError,
-                RuntimeError,
-                TimeoutError,
                 TypeError,
                 ValueError,
             ) as exc:
+                last_exc = exc  # 代码或参数错误，重试也没用
+                break  # 不可重试的错误，直接退出循环
+            except (ConnectionError, OSError, RuntimeError, TimeoutError) as exc:
                 # 会话可能已损坏（比如连接被对端关闭），标记为未初始化，下一轮循环触发重连
-                self._initialized = False
-                logger.warning(
-                    "MCP call failed (attempt %d/%d): tool=%s err=%s",
-                    attempt,
-                    max_attempts,
-                    tool_name,
-                    exc,
-                )
-                if self._session is not None:
-                    try:
-                        if self._exit_stack is not None:
-                            await self._exit_stack.aclose()
-                    except (
-                        AttributeError,
-                        OSError,
-                        RuntimeError,
-                        TimeoutError,
-                        ValueError,
-                    ) as close_exc:
-                        logger.warning("Error closing MCP session: %s", close_exc)
-                    finally:
-                        self._session = None
-                        self._exit_stack = None
+                last_exc = exc
+                await self._reset_session()
+                if request_sent and not retry_safe:
+                    logger.warning("MCP tool %s not idempotent, skip retry: %s", tool_name, exc)
+                    break
                 if attempt < max_attempts:
-                    await asyncio.sleep(0.2 * attempt)
-        return {"status": "error", "tool_name": tool_name, "tool_args": tool_args}
+                    await asyncio.sleep(backoff_delay(attempt - 1, base=0.2, cap=2.0))
+        return {
+            "status": "error",
+            "data": [],
+            "row_count": 0,
+            "error_code": "timeout" if isinstance(last_exc, TimeoutError) else "mcp_call_failed",
+            "message": str(last_exc),
+        }
 
     async def call_tool(self, tool_name: str, tool_args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -249,3 +228,27 @@ class RemoteMCPClient:
             return
         await self._queue.put(None)
         await self._worker_task
+
+    def _format_tool_result(self, result: Any) -> dict[str, Any]:
+        content = result.content
+        if isinstance(content, list) and content:
+            texts = [getattr(item, "text", str(item)) for item in content if item is not None]
+            return {
+                "status": "success",
+                "data": [{"result": "\n".join(texts)}],
+                "row_count": len(content),
+                "error_code": "",
+                "message": "ok",
+            }
+        return {"status": "success", "data": [], "row_count": 0, "error_code": "", "message": "ok"}
+
+    async def _reset_session(self) -> None:
+        self._initialized = False
+        try:
+            if self._exit_stack is not None:
+                await self._exit_stack.aclose()
+        except (AttributeError, OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            logger.warning("Error closing MCP session: %s", exc)
+        finally:
+            self._session = None
+            self._exit_stack = None

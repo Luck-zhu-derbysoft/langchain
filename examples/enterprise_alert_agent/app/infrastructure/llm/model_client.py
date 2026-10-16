@@ -3,29 +3,35 @@ import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import httpx
 from langsmith.run_trees import RunTree, logger
 from openai import APIConnectionError, APIError, AsyncOpenAI, AuthenticationError
 
 from app.config.settings import settings
 from app.infrastructure.fault.circuit_breaker import CircuitBreaker, CircuitOpenError
+from app.infrastructure.fault.retry_policy import DeadLine, backoff_delay, is_retryable
 from app.infrastructure.llm.context_budget import estimate_tokens
 from app.observability.langsmith_tracer import LangSmithTracer
 
 
 class ModelClient:
     def __init__(self, tracer: LangSmithTracer) -> None:
-        self._async_client_map = {
-            "dashscope": AsyncOpenAI(
-                api_key=settings.dashscope_api_key,
-                base_url=settings.dashscope_base_url,
-                timeout=settings.request_timeout_seconds,
-            ),
-            "openai": AsyncOpenAI(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-                timeout=settings.request_timeout_seconds,
-            ),
-        }
+        self._async_client_map = {}
+        _timeout = httpx.Timeout(
+            settings.request_timeout_seconds, connect=settings.connect_timeout_seconds
+        )
+        self._async_client_map["dashscope"] = AsyncOpenAI(
+            api_key=settings.dashscope_api_key,
+            base_url=settings.dashscope_base_url,
+            timeout=_timeout,
+            max_retries=0,
+        )
+        self._async_client_map["openai"] = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            timeout=_timeout,
+            max_retries=0,
+        )
         self._tracer = tracer
         self._circuit_breaker = CircuitBreaker(
             name="llm",
@@ -62,6 +68,7 @@ class ModelClient:
         try:
             completion = None
             last_error: Exception | None = None
+            deadline = DeadLine.after(settings.model_total_deadline_seconds)
             for provider, model_name in candidates:
                 _async_client = self._async_client_map.get(provider)
                 if _async_client is None:
@@ -81,25 +88,42 @@ class ModelClient:
                     payload["tools"] = tools
 
                 for attempt in range(settings.model_max_retries + 1):
+                    remaining = deadline.remaining()
+                    if remaining <= 0:
+                        break
                     try:
                         self._circuit_breaker.before_call()
-                        completion = await _async_client.chat.completions.create(**payload)
+                        completion = await _async_client.with_options(
+                            timeout=httpx.Timeout(
+                                min(remaining, settings.request_timeout_seconds),
+                                connect=min(remaining, settings.connect_timeout_seconds),
+                            )
+                        ).chat.completions.create(**payload)
                         self._circuit_breaker.record_success()
                         break
                     except AuthenticationError:
                         raise
                     except Exception as exc:
                         last_error = exc
-                        self._circuit_breaker.record_failure()
-                        if not self._classify_error(exc):
+                        if not is_retryable(exc):
                             raise
-                        if attempt < settings.model_max_retries:
-                            await asyncio.sleep(
-                                min(
-                                    settings.model_retry_backoff_seconds * (2**attempt),
-                                    8.0,
-                                )
-                            )
+                        self._circuit_breaker.record_failure()
+                        delay = backoff_delay(
+                            attempt,
+                            base=settings.model_retry_backoff_seconds,
+                            cap=settings.model_retry_backoff_cap_seconds,
+                            exc=exc,
+                        )
+                        if attempt >= settings.model_max_retries or not deadline.can_afford(delay):
+                            break  # 当前模型不再重试，换下一个候选模型
+                        logger.warning(
+                            "LLM transient error, retrying: provider=%s attempt=%d delay=%.2fs err=%s",
+                            provider,
+                            attempt + 1,
+                            delay,
+                            exc,
+                        )
+                        await asyncio.sleep(delay)
                 if completion is not None:
                     break
             if completion is None:
@@ -172,6 +196,9 @@ class ModelClient:
         self._validate_input_budget(user_query, system_prompt, tools)
 
         try:
+            deadline = DeadLine.after(settings.model_total_deadline_seconds)
+            emitted = False
+            last_error: Exception | None = None
             for provider, model_name in candidates:
                 _async_client = self._async_client_map.get(provider)
                 if not _async_client:
@@ -190,64 +217,100 @@ class ModelClient:
                 }
                 if tools:
                     payload["tools"] = tools
+                for attempt in range(settings.model_max_retries + 1):
+                    remaining = deadline.remaining()
+                    if remaining <= 0:
+                        break
+                    stream = None
+                    try:
+                        self._circuit_breaker.before_call()
+                        stream = await _async_client.with_options(
+                            timeout=httpx.Timeout(
+                                min(remaining, settings.request_timeout_seconds),
+                                connect=min(remaining, settings.connect_timeout_seconds),
+                            )
+                        ).chat.completions.create(**payload)
+                        answer_parts: list[str] = []
+                        iterator = stream.__aiter__()
+                        while True:
+                            try:
+                                chunk = await asyncio.wait_for(
+                                    anext(iterator), timeout=settings.stream_idle_timeout_seconds
+                                )
+                            except StopAsyncIteration:
+                                break
+                            if not chunk.choices or not chunk.choices[0].delta:
+                                continue
+                            piece = getattr(chunk.choices[0].delta, "content", "")
+                            if piece:
+                                emitted = True
+                                answer_parts.append(piece)
+                                yield piece
+                        self._circuit_breaker.record_success()
+                        self._tracer.end_run(
+                            llm_run,
+                            outputs={"answer_length": len("".join(answer_parts)), "stream": True},
+                        )
+                        return
+                    except CircuitOpenError as exc:
+                        self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+                        raise ModelRequestError("LLM circuit is open") from exc
+                    except AuthenticationError as exc:
+                        self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+                        raise ModelAuthError("Model authentication failed") from exc
+                    except Exception as exc:
+                        last_error = exc
+                        if emitted:
+                            # 已经输出过部分内容，重试或切模型会把内容再发一遍，只能直接失败
+                            self._circuit_breaker.record_failure()
+                            self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
+                            raise ModelRequestError(
+                                "Stream interrupted after partial output"
+                            ) from exc
+                        if not is_retryable(last_error):
+                            self._tracer.end_run(
+                                llm_run, error=LangSmithTracer.format_error(last_error)
+                            )
+                            raise
+                        self._circuit_breaker.record_failure()
+                        delay = backoff_delay(
+                            attempt,
+                            base=settings.model_retry_backoff_seconds,
+                            cap=settings.model_retry_backoff_cap_seconds,
+                            exc=exc,
+                        )
+                        if attempt >= settings.model_max_retries or not deadline.can_afford(delay):
+                            break
+                        await asyncio.sleep(delay)
+                    finally:
+                        if stream is not None:
+                            await stream.close()
 
-                try:
-                    self._circuit_breaker.before_call()
-                    stream = await _async_client.chat.completions.create(**payload)
-                    self._circuit_breaker.record_success()
-                    answer_parts: list[str] = []
-                    async for chunk in stream:
-                        if not chunk.choices or not chunk.choices[0].delta:
-                            continue
-                        piece = getattr(chunk.choices[0].delta, "content", "")
-                        if piece:
-                            answer_parts.append(piece)
-                            yield piece
-                    self._tracer.end_run(
-                        llm_run,
-                        outputs={"answer_length": len("".join(answer_parts)), "stream": True},
-                    )
-                    return
-                except CircuitOpenError as exc:
-                    self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-                    raise ModelRequestError("LLM circuit is open") from exc
-                except AuthenticationError as exc:
-                    self._circuit_breaker.record_failure()
-                    self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-                    raise ModelAuthError("Model authentication failed") from exc
-                except (APIConnectionError, APIError) as exc:
-                    self._circuit_breaker.record_failure()
-                    logger.warning(
-                        "Async stream failed for provider=%s model=%s, trying fallback: %s",
-                        provider,
-                        model_name,
-                        exc,
-                    )
-                    continue
-                except Exception as exc:
-                    self._circuit_breaker.record_failure()
-                    self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
-                    raise
-
-            raise ModelRequestError("Model request failed after retries and fallback attempts.")
+            final_error = ModelRequestError(
+                "Model request failed after retries and fallback attempts."
+            )
+            self._tracer.end_run(
+                llm_run, error=LangSmithTracer.format_error(last_error or final_error)
+            )
+            raise final_error from last_error
         except CircuitOpenError as exc:
             self._tracer.end_run(llm_run, error=LangSmithTracer.format_error(exc))
             raise ModelRequestError("LLM circuit is open") from exc
 
-    def _classify_error(self, error: Exception) -> bool:
-        """判断错误是否可重试"""
-        transient_errors = (
-            APIConnectionError,
-            TimeoutError,
-            ConnectionResetError,
-        )
-        non_retryable = (
-            AuthenticationError,
-            ValueError,
-        )
-        if isinstance(error, non_retryable):
-            return False
-        return isinstance(error, transient_errors)
+    # def _classify_error(self, error: Exception) -> bool:
+    #     """判断错误是否可重试"""
+    #     transient_errors = (
+    #         APIConnectionError,
+    #         TimeoutError,
+    #         ConnectionResetError,
+    #     )
+    #     non_retryable = (
+    #         AuthenticationError,
+    #         ValueError,
+    #     )
+    #     if isinstance(error, non_retryable):
+    #         return False
+    #     return isinstance(error, transient_errors)
 
     def _route_request(self) -> list[tuple[str, str]]:
         """Return ordered provider/model candidates for routing and fallback."""

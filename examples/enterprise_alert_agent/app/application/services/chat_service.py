@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 import uuid
@@ -1406,7 +1407,8 @@ class ChatService:
 
             async def _retry_handler(ctx: FaultContext, attempt_no: int) -> RecoveryAttempt:
                 diag = self.fault_analyzer.analyze(ctx)
-                backoff = retry_backoff_seconds(diag)
+                backoff = min(retry_backoff_seconds(diag), settings.task_retry_backoff_cap_seconds)
+                backoff = random.uniform(backoff / 2, backoff) if backoff > 0 else 0.0
                 if backoff > 0:
                     await asyncio.sleep(backoff)
                 res = await _execute_subtask_core(subtask.description, subtask.assigned_agent_id)

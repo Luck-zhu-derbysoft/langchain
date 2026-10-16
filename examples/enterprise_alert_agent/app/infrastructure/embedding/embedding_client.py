@@ -4,6 +4,7 @@
 将文本转换为向量表示，供向量检索使用。
 """
 
+import httpx
 from langsmith.run_trees import RunTree
 from openai import OpenAI
 
@@ -18,7 +19,10 @@ class EmbeddingClient:
         self._client = OpenAI(
             api_key=settings.dashscope_api_key,
             base_url=settings.dashscope_base_url,
-            timeout=settings.request_timeout_seconds,
+            timeout=httpx.Timeout(
+                settings.request_timeout_seconds, connect=settings.connect_timeout_seconds
+            ),
+            max_retries=settings.model_max_retries,
         )
         self._tracer = tracer
         self._model = settings.embedding_model
