@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 
 from app.config.settings import settings
+from app.infrastructure.fault.retry_policy import backoff_delay, is_retryable
 from app.observability.alert_types import Alert, AlertSeverity, AlertTypes
 from app.observability.prometheus_metrics import (
     ALERT_COUNT,
@@ -153,15 +154,42 @@ class AlertManager:
             "context": alert.context,
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=settings.alert_webhook_timeout_seconds) as client:
-                response = await client.post(settings.alert_webhook_url, json=payload)
-                response.raise_for_status()
-            ALERT_NOTIFICATION_COUNT.labels(channel="webhook", status="success").inc()
-            logger.info("Alert notification sent: alert_id=%s", alert.alert_id)
-        except httpx.HTTPError:
-            ALERT_NOTIFICATION_COUNT.labels(channel="webhook", status="failure").inc()
-            logger.exception("Alert notification failed: alert_id=%s", alert.alert_id)
+        headers = {"Idempotency-Key": alert.alert_id}
+        max_attempts = max(1, settings.alert_webhook_max_attempts)
+        async with httpx.AsyncClient(timeout=settings.alert_webhook_timeout_seconds) as client:
+            for attempt in range(max_attempts):
+                try:
+                    response = await client.post(
+                        settings.alert_webhook_url,
+                        json=payload,
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                except httpx.HTTPError as exc:
+                    if not is_retryable(exc) or attempt + 1 >= max_attempts:
+                        ALERT_NOTIFICATION_COUNT.labels(channel="webhook", status="failure").inc()
+                        logger.exception("Alert notification failed: alert_id=%s", alert.alert_id)
+                        return
+                    delay = backoff_delay(
+                        attempt,
+                        base=settings.alert_webhook_retry_backoff_seconds,
+                        cap=settings.alert_webhook_retry_backoff_cap_seconds,
+                        exc=exc,
+                    )
+                    logger.warning(
+                        "Alert notification transient failure, retrying: alert_id=%s "
+                        "attempt=%d delay=%.2fs err=%s",
+                        alert.alert_id,
+                        attempt + 1,
+                        delay,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                ALERT_NOTIFICATION_COUNT.labels(channel="webhook", status="success").inc()
+                logger.info("Alert notification sent: alert_id=%s", alert.alert_id)
+                return
 
     @staticmethod
     def _format_alert_email(alert: Alert) -> str:

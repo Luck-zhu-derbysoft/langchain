@@ -12,6 +12,8 @@ def is_retryable(exc: BaseException) -> bool:
 
     if isinstance(exc, (APIConnectionError, TimeoutError, ConnectionError, httpx.TransportError)):
         return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUS
     if isinstance(exc, APIStatusError):
         return exc.status_code in _RETRYABLE_STATUS
     return False

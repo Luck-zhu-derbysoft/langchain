@@ -190,6 +190,9 @@ class Settings(BaseSettings):
     circuit_breaker_recovery_seconds: float = 30.0
     alert_webhook_url: str = ""
     alert_webhook_timeout_seconds: float = 5.0
+    alert_webhook_max_attempts: int = 3
+    alert_webhook_retry_backoff_seconds: float = 0.5
+    alert_webhook_retry_backoff_cap_seconds: float = 5.0
     rate_limit_storage_uri: str = "memory://"
     rate_limit_chat: str = "10/minute"
     rate_limit_write: str = "5/minute"
