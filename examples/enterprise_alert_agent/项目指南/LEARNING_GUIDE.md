@@ -10,41 +10,41 @@
 ### 1. 异步与并发（核心1）
 | 技能点 | 项目现状 | 落地练习 | 优先级 |
 |---|---|---|---|
-(已修复)| asyncio / 线程边界 | 🔴 线程里调 `asyncio.create_task` 报错 | 修 `alert_manager` P0 BUG | 🔴 |
-(已修复)| 线程安全 / 共享状态 | 指标/注册表无锁 | 加锁 + 环形缓冲 | 🔴 |
+(已修复)| asyncio / 线程边界 | 🔴 线程里调 `asyncio.create_task` 报错 | 修 `alert_manager` P0 BUG | 🟡 |
+(已修复)| 线程安全 / 共享状态 | 指标/注册表无锁 | 加锁 + 环形缓冲 | 🟡 |
 | 异步驱动 / 连接池 | ✅ 已异步化 | 画时序图复盘 | 🟡 |
 
 ### 2. 数据库与消息队列（核心2 + 文档3）
-(已修复)| SQLModel ORM | ❌ 裸 psycopg | 建表 + 迁移 | 🔴 |
+(已修复)| SQLModel ORM | ❌ 裸 psycopg | 建表 + 迁移 | 🟡 |
 | PG/Redis 连接池 / 索引 | ✅ 部分 | 复盘预热逻辑 | 🟡 |
-(已修复)| 消息队列（Stream/Celery/Kafka/RabbitMQ） | ❌ 仅 DLQ 无消费 | DLQ 消费 + Redis Stream | 🔴 |
-(已修复)| 幂等 / 热点数据 | ❌ 未做 | ingest 幂等键（SETNX） | 🔴 |
+(已修复)| 消息队列（Stream/Celery/Kafka/RabbitMQ） | ❌ 仅 DLQ 无消费 | DLQ 消费 + Redis Stream | 🟡 |
+(已修复)| 幂等 / 热点数据 | ❌ 未做 | ingest 幂等键（SETNX） | 🟡 |
 
 一、技能清单| 3. Agent 核心技能中的Agent 评估（LLM-as-judge）技能点，需要修改的内容。给出对比代码，方便我手动修复
 
 ### 3. Agent 核心技能（优先1 + 加分1/2/3 + 职责①②③）
-(已修复)| Skills 技能生态（注册/注入） | ⚠️ 技能写死 | `static.py` 改注册表 | 🔴 |
-(已修复)| 工具调用 / MCP | ⚠️ 会话无超时 | MCP 会话复用 | 🟠 |
-(已修复)| 多模型接入与路由 | ⚠️ 仅单 provider | 路由 + 主备降级 | 🔴 |
-(已修复)| LangGraph 编排 | ❌ 未图化 | L1→L4 `StateGraph` | 🟠 |
+(已修复)| Skills 技能生态（注册/注入） | ⚠️ 技能写死 | `static.py` 改注册表 | 🟡 |
+(已修复)| 工具调用 / MCP | ⚠️ 会话无超时 | MCP 会话复用 | 🟡 |
+(已修复)| 多模型接入与路由 | ⚠️ 仅单 provider | 路由 + 主备降级 | 🟡 |
+(已修复)| LangGraph 编排 | ❌ 未图化 | L1→L4 `StateGraph` | 🟡 |
 (已修复)| 多智能体 + 反思 | ✅ Reviewer → Reviser 有界闭环 | 复盘证据约束、评分阈值和终止条件 | 🟡 |
-(已修复)| 上下文工程 / Token 优化 | ⚠️ 无上下文预算 | 上下文预算日志 | 🔴 |
-(已修复)| 任务状态管理 / 状态机 | 已实现状态持久化、启动清理与 HITL 恢复 | 任务状态表 + 恢复 | 
-(已修复)| Agent 评估（LLM-as-judge） | ✅ Golden Set + Judge 评分 + CI 门禁 | 持续增加样本并复核评分波动 | 🟠 |
+(已修复)| 上下文工程 / Token 优化 | ⚠️ 无上下文预算 | 上下文预算日志 | 🟡 |
+(已修复)| 任务状态管理 / 状态机 | 已实现状态持久化、启动清理与 HITL 恢复 | 任务状态表 + 恢复 | 🟡 |
+(已修复)| Agent 评估（LLM-as-judge） | ✅ Golden Set + Judge 评分 + CI 门禁 | 持续增加样本并复核评分波动 | 🟡 |
 
 ### 4. RAG 知识层（加分1/4 + 文档4）
 | 混合检索 / 重排 | ✅ 向量候选 + BM25 融合 + FlashRank 重排；
 | 向量库对比（Chroma/Qdrant/Milvus） | ✅ Chroma | Qdrant 跑通对比 | 🟡 |
-(已修复)| RAG 评估 | ✅ 独立检索 Golden Set + Hit@K/Recall@K/MRR/nDCG + CI 阈值门禁 | 持续扩充困难样本并监控指标波动 | 🟠 |
+(已修复)| RAG 评估 | ✅ 独立检索 Golden Set + Hit@K/Recall@K/MRR/nDCG + CI 阈值门禁 | 持续扩充困难样本并监控指标波动 | 🟡 |
 | 知识图谱 / GraphRAG | ❌ 无 | 最小实体关系图 | 🟢 |
-(已修复)| Hugging Face 本地推理 | ✅ Transformers + Qwen 本地推理 demo，并有无模型下载单测 | 对接统一模型路由并记录延迟/内存 | 🟢 |
+(已修复)| Hugging Face 本地推理 | ✅ Transformers + Qwen 本地推理 demo，并有无模型下载单测 | 对接统一模型路由并记录延迟/内存 | 🟡 |
 | Fine-tuning（LoRA/SFT） | ❌ 未实现 | 准备告警领域数据集，使用 PEFT/TRL 训练并评估 | 🟢 |
 (已确认)| 依赖注入 / 资源生命周期 | ✅ `create_app()` 管理应用级共享资源，`Depends(_get_chat_service)` 组装请求级服务 | 可选：类型化依赖容器 + FastAPI `lifespan` | 🟡 |
 
 ### 5. 弹性与高并发（核心3 + 文档5）
 | 熔断 / 背压 / 优雅停机 | ✅ 已全做 | 复盘状态机 | 🟡 |
 (已修复)| 限流 / 降级 | ✅ 业务接口分层配额 + Redis 可配置共享计数/内存降级 + 并发过载 503；模型主备与熔断 | 持续压测并按租户容量调参 | 🟡 |
-(已修复)| 弱网 / 超时重试 | ✅ LLM/MCP/Webhook 均有超时与有限重试；区分瞬时/永久错误，Webhook 以告警 ID 幂等重放，并有重试成功、不可重试及耗尽单测 | 持续做网络故障注入与重试指标监控 | 🟠 |
+(已修复)| 弱网 / 超时重试 | ✅ LLM/MCP/Webhook 均有超时与有限重试；区分瞬时/永久错误，Webhook 以告警 ID 幂等重放，并有重试成功、不可重试及耗尽单测 | 持续做网络故障注入与重试指标监控 | 🟡 |
 
 ### 6. 可观测与排障（核心5 + 加分8）
 | 日志 / 指标 / 追踪 | ✅ 骨架已齐 | 补埋点 + 延迟 Histogram | 🟠 |
