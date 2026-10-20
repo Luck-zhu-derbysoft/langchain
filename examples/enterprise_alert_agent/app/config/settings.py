@@ -183,7 +183,8 @@ class Settings(BaseSettings):
     # ========== 安全配置==========
     admin_jwt_secret: str = ""
     admin_jwt_algorithm: str = "HS256"
-    admin_api_key: str = ""
+    # user_id -> {api_key_hash, role, tenant_id}，签发时角色/租户以此为准，拒绝客户端自报值
+    admin_principals: dict[str, dict[str, str]] = Field(default_factory=dict)
     max_concurrent_requests: int = 100
     graceful_shutdown_timeout_seconds: float = 30.0
     circuit_breaker_failure_threshold: int = 5

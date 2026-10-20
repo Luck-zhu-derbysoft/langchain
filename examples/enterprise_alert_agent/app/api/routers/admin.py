@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.config.dynamic_settings import ALLOWED_CONFIG_KEYS, _dynamic_settings
 from app.infrastructure.audit.audit_logger import AuditAction, AuditResult, audit_logger
@@ -11,8 +11,9 @@ from app.infrastructure.security.auth import (
     Role,
     TokenPayload,
     create_access_token,
+    get_principal_tenant,
     require_roles,
-    verify_api_key,
+    verify_principal,
 )
 from app.main import limiter
 
@@ -21,20 +22,37 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 class TokenRequest(BaseModel):
     user_id: str
-    role: Role = Role.OPERATOR
     api_key: str
-    tenant_id: str = Field(..., min_length=1, description="租户 ID，写入 JWT")
+    # role/tenant_id 不接受客户端输入，由服务端 admin_principals 主体表派生
 
 
 @router.post("/token")
 @limiter.limit("5/minute")  # 限制每分钟最多请求次数
 async def create_token(request: Request, token_request: TokenRequest):
-    if not verify_api_key(token_request.user_id, token_request.api_key):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    role = verify_principal(token_request.user_id, token_request.api_key)
+    tenant_id = get_principal_tenant(token_request.user_id)
+    if not role or not tenant_id:
+        audit_logger.log(
+            action=AuditAction.LOGIN,
+            user_id=token_request.user_id,
+            result=AuditResult.FAILURE,
+            tenant_id="unknown",
+            resource="/admin/token",
+            detail={"reason": "invalid credentials"},
+        )
+        raise HTTPException(status_code=401, detail="Invalid API key or tenant ID")
     token = create_access_token(
         token_request.user_id,
-        token_request.role,
-        token_request.tenant_id,
+        role,
+        tenant_id,
+    )
+    audit_logger.log(
+        action=AuditAction.LOGIN,
+        user_id=token_request.user_id,
+        result=AuditResult.SUCCESS,
+        tenant_id=tenant_id,
+        resource="/admin/token",
+        detail={"role": role.value},
     )
     return {"token": token}
 

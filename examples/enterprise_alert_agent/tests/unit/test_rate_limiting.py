@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -48,13 +50,19 @@ def test_rate_limit_key_falls_back_to_ip_without_token() -> None:
 def test_rate_limit_response_includes_retry_headers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(settings, "admin_api_key", "rate-limit-api-key")
+    monkeypatch.setattr(
+        settings,
+        "admin_principals",
+        {
+            "rate-user": {
+                "api_key_hash": hashlib.sha256(b"rate-limit-api-key").hexdigest(),
+                "role": "operator",
+                "tenant_id": "rate-tenant",
+            }
+        },
+    )
     client = TestClient(app)
-    payload = {
-        "user_id": "rate-user",
-        "tenant_id": "rate-tenant",
-        "api_key": "rate-limit-api-key",
-    }
+    payload = {"user_id": "rate-user", "api_key": "rate-limit-api-key"}
 
     responses = [client.post("/admin/token", json=payload) for _ in range(6)]
 

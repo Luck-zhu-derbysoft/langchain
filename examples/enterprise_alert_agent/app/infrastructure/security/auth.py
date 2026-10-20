@@ -1,5 +1,7 @@
+import hashlib
 import hmac
 import logging
+import secrets
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Annotated, cast
@@ -30,20 +32,6 @@ class TokenPayload(BaseModel):
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/admin/token", auto_error=False)
 
 
-def verify_api_key(user_id: str, api_key: str) -> bool:
-    """校验管理端签发 token 的凭证（API Key 方式）。
-
-    使用 hmac.compare_digest 常量时间比较，防止时序攻击。
-    """
-    expected = settings.admin_api_key
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Admin API key is not configured.",
-        )
-    return hmac.compare_digest(api_key, expected)
-
-
 def create_access_token(
     user_id: str, role: Role, tenant_id: str, expires_minutes: int | None = None
 ) -> str:
@@ -54,9 +42,32 @@ def create_access_token(
         "role": role.value,
         "exp": int(expire_at.timestamp()),
         "tenant_id": tenant_id,
+        "jti": secrets.token_urlsafe(8),
     }
     token = jwt.encode(payload, settings.admin_jwt_secret, algorithm=settings.admin_jwt_algorithm)
     return token
+
+
+def get_principal_tenant(user_id: str) -> str | None:
+    """根据用户 ID 获取其所属租户 ID。"""
+    principal = settings.admin_principals.get(user_id)
+    if principal:
+        return principal.get("tenant_id")
+    return None
+
+
+def verify_principal(user_id: str, api_key: str) -> Role | None:
+    """根据用户 ID 和租户 ID 校验其角色。"""
+    principal = settings.admin_principals.get(user_id)
+    if not principal:
+        return None
+    expected_hash = principal.get("api_key_hash", "")
+    if not expected_hash:
+        return None
+    provided_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    if not hmac.compare_digest(provided_hash, expected_hash):
+        return None
+    return Role(principal.get("role")) if principal.get("role") else None
 
 
 def get_current_user(token: str | None = Depends(oauth2_scheme)) -> TokenPayload:
