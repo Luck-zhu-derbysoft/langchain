@@ -26,12 +26,14 @@ class ModelClient:
             timeout=_timeout,
             max_retries=0,
         )
-        self._async_client_map["openai"] = AsyncOpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            timeout=_timeout,
-            max_retries=0,
-        )
+        # openai 为可选备用 provider，未配置密钥时不构造客户端，避免启动即失败
+        if settings.openai_api_key:
+            self._async_client_map["openai"] = AsyncOpenAI(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                timeout=_timeout,
+                max_retries=0,
+            )
         self._tracer = tracer
         self._circuit_breaker = CircuitBreaker(
             name="llm",

@@ -26,7 +26,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DASHSCOPE_BASE_URL", "BASE_URL"),
     )
     # 多 provider 配置
-    openai_api_key: str = "213"
+    openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"
     anthropic_api_key: str = ""
@@ -182,6 +182,8 @@ class Settings(BaseSettings):
     }
     # ========== 安全配置==========
     admin_jwt_secret: str = ""
+    # 轮换期内保留的上一把密钥：验证时新旧皆可，签发始终用 admin_jwt_secret
+    admin_jwt_secret_previous: str = ""
     admin_jwt_algorithm: str = "HS256"
     # user_id -> {api_key_hash, role, tenant_id}，签发时角色/租户以此为准，拒绝客户端自报值
     admin_principals: dict[str, dict[str, str]] = Field(default_factory=dict)
@@ -209,13 +211,18 @@ def _validate_secrets(s: "Settings") -> None:
 
     # fail fast if any required secret is missing
     required = {
-        "DASHSCOPE_API_KEY": s.dashscope_api_key,
         "ADMIN_JWT_SECRET": s.admin_jwt_secret,
         "REDIS_PASSWORD": s.redis_password,
         "PG_PASSWORD": s.pg_password,
     }
     if s.mysql_host:
         required["MYSQL_PASSWORD"] = s.mysql_password
+    if s.llm_provider == "dashscope":
+        required["DASHSCOPE_API_KEY"] = s.dashscope_api_key
+    elif s.llm_provider == "openai":
+        required["OPENAI_API_KEY"] = s.openai_api_key
+    elif s.llm_provider == "anthropic":
+        required["ANTHROPIC_API_KEY"] = s.anthropic_api_key
     missing = [k for k, v in required.items() if not v]
     if missing:
         print(
@@ -227,5 +234,4 @@ def _validate_secrets(s: "Settings") -> None:
 
 
 settings = Settings()
-_validate_secrets(settings)
 _validate_secrets(settings)

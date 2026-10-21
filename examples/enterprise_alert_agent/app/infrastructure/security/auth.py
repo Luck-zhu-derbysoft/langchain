@@ -4,7 +4,7 @@ import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -87,9 +87,7 @@ def get_current_user(token: str | None = Depends(oauth2_scheme)) -> TokenPayload
         if token is None:
             logger.warning("Authentication failed: bearer token is missing")
             raise credentials_exception
-        payload = jwt.decode(
-            token, settings.admin_jwt_secret, algorithms=[settings.admin_jwt_algorithm]
-        )
+        payload = _decode_with_rotation(token)
         sub = payload.get("sub")
         role = payload.get("role")
         exp = payload.get("exp")
@@ -101,6 +99,19 @@ def get_current_user(token: str | None = Depends(oauth2_scheme)) -> TokenPayload
     except (jwt.PyJWTError, ValueError) as exc:
         logger.warning("Authentication failed: invalid token (%s)", type(exc).__name__)
         raise credentials_exception
+
+
+def _decode_with_rotation(token: str) -> dict[str, Any]:
+    """依次尝试当前密钥与轮换期内的上一把密钥，全部失败才抛出异常。"""
+    last_exc: jwt.PyJWTError = jwt.InvalidTokenError("no secret configured")
+    for secret in [settings.admin_jwt_secret, getattr(settings, "admin_jwt_secret_previous", None)]:
+        if not secret:
+            continue
+        try:
+            return jwt.decode(token, secret, algorithms=[settings.admin_jwt_algorithm])
+        except jwt.PyJWTError as exc:
+            last_exc = exc
+    raise last_exc
 
 
 def require_auth(token_data: Annotated[TokenPayload, Depends(get_current_user)]) -> TokenPayload:
@@ -132,11 +143,7 @@ def get_rate_limit_identity(token: str) -> str | None:
         A tenant-scoped user identity, or `None` when the token or claims are invalid.
     """
     try:
-        payload = jwt.decode(
-            token,
-            settings.admin_jwt_secret,
-            algorithms=[settings.admin_jwt_algorithm],
-        )
+        payload = _decode_with_rotation(token)
     except jwt.PyJWTError:
         return None
 
