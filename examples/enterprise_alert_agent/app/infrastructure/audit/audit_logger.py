@@ -24,6 +24,9 @@ class AuditResult(str, Enum):
     DENIED = "denied"
 
 
+# 1. `_compute_entry_hash`：生成指纹，防篡改
+# 2. `write + flush + fsync`：强持久化，防掉电丢失
+# 3. `_rotate_if_needed`：按大小滚动，控制单文件体积，归档历史记录
 @dataclass
 class AuditLogEntry:
     audit_id: str
@@ -79,11 +82,15 @@ class AuditLogger:
                 return self._GENESIS_HASH
 
     def _rotate_if_needed(self) -> None:
+        # 判断：文件存在并且超过单文件最大字节限制，触发日志滚动
         if self._log_file.exists() and self._log_file.stat().st_size >= self._max_file_bytes:
+            # 构造归档文件名：原名称 + UTC时间戳 + 后缀
             rotated_file = self._log_file.with_name(
                 f"{self._log_file.stem}_{datetime.now(UTC):%Y%m%dT%H%M%S}{self._log_file.suffix}"
             )
+            # 原子重命名，把当前日志文件归档
             self._log_file.rename(rotated_file)
+            # 【注意】业务代码这里需要关闭旧文件句柄，下次写入重新open
 
     def log(
         self,
@@ -121,14 +128,21 @@ class AuditLogger:
     def _append_to_file(self, entry: AuditLogEntry) -> None:
         self._rotate_if_needed()
         with open(self._log_file, "a", encoding="utf-8") as f:
+            # 序列化为jsonl一行，中文不转义
             f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
+            # 刷Python文件缓冲区到操作系统内核缓存
             f.flush()
+            # 强制内核缓存数据落地磁盘，防止掉电丢失（强持久化）
             os.fsync(f.fileno())
 
     def _compute_entry_hash(self, entry: AuditLogEntry) -> str:
         payload = entry.to_dict()
-        payload.pop("entry_hash", None)  # 不将 entry_hash 本身纳入哈希计算
+        # 把自身的 `entry_hash` 字段删掉。
+        # 原因：hash 是这条数据的指纹，如果把 hash 值本身参与计算，会形成循环
+        payload.pop("entry_hash", None)
+        # sort_keys=True 保证字典有序序列化，确保相同内容生成相同字符串
         entry_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        # sha256生成数据指纹，用于审计日志防篡改校验
         return hashlib.sha256(entry_json.encode("utf-8")).hexdigest()
 
     def query(
