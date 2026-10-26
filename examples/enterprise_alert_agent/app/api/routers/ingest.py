@@ -86,9 +86,9 @@ _idempotency_guard = IdempotencyGuard(
 
 def _idempotency_key(req: IngestTextRequest, idempotency_key: str | None) -> str:
     if idempotency_key:
-        return f"idemp:ingest:{idempotency_key}"
+        return f"idemp:ingest:{req.tenant_id}:{idempotency_key}"
     digest = hashlib.sha256(f"{req.source_id}:{req.content}".encode()).hexdigest()
-    return f"idemp:ingest:{req.source_id}:{digest}"
+    return f"idemp:ingest:{req.tenant_id}:{req.source_id}:{digest}"
 
 
 @router.post("/text", response_model=IngestResponse)
@@ -108,6 +108,7 @@ async def ingest_text(
         "metadata": {"category": "告警规则"}
     }
     """
+    req.tenant_id = _auth.tenant_id
     if len(req.content.encode("utf-8")) > MAX_INGEST_TEXT_SIZE:
         raise HTTPException(
             status_code=413, detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit"
@@ -150,7 +151,7 @@ def ingest_stats(
         tags=["api", "ingest", "stats"],
     )
     try:
-        resp = {"total_documents": _chroma_store.count()}
+        resp = {"total_documents": _chroma_store.count(where={"tenant_id": _auth.tenant_id})}
         _trace.end_run(root_run, outputs=resp)
         return resp
     except Exception as exc:
@@ -200,6 +201,7 @@ async def ingest_file(
                 "filename": file_name,
                 "suffix": Path(file_name).suffix,
             },
+            tenant_id=_auth.tenant_id,
         )
 
         idempotency_key_value = _idempotency_key(ingest_req, idempotency_key)

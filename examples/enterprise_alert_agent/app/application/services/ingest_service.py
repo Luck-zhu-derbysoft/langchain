@@ -64,6 +64,7 @@ class IngestService:
                     "source_id": req.source_id,
                     "chunk_index": str(i),
                     **req.metadata,
+                    "tenant_id": req.tenant_id,
                 }
                 for i in range(len(chunks))
             ]

@@ -137,9 +137,12 @@ class ChromaStore:
             self._tracer.end_run(run, error=LangSmithTracer.format_error(e))
             raise
 
-    def count(self) -> int:
+    def count(self, where: dict[str, Any] | None = None) -> int:
         """返回当前 collection 中的文档总数。"""
-        return self._collection.count()
+        if where is None:
+            return self._collection.count()
+        # chromadb Collection 无原生带 where 的 count，用 get(..., include=[]) 取 ids 长度
+        return len(self._collection.get(where=where, include=[])["ids"])
 
     def iter_documents(self, *, where: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
         offset = 0

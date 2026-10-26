@@ -383,7 +383,7 @@ class ChatService:
                     req.query,
                     top_k=settings.retrieval_final_k,
                     history_text=history_prompt_context,
-                    where=None,
+                    where={"tenant_id": req.tenant_id},
                     parent_run=ask_run,
                 )
                 docs = docs[: settings.context_top_k]
@@ -1431,7 +1431,11 @@ class ChatService:
 
             async def _rag_only_handler(ctx: FaultContext, diag: Any) -> RecoveryAttempt:
                 try:
-                    rag_docs = await asyncio.to_thread(self.retriever.retrieve, subtask.description)
+                    rag_docs = await asyncio.to_thread(
+                        self.retriever.retrieve,
+                        subtask.description,
+                        where={"tenant_id": history_scope.tenant_id},
+                    )
                     summary = "\n".join([str(doc) for doc in rag_docs])
                     return RecoveryAttempt(bool(summary), output=summary)
                 except Exception as e:  # noqa: BLE001

@@ -9,6 +9,8 @@ class IngestTextRequest(BaseModel):
     content: str = Field(..., min_length=1, description="待摄入的文本内容")
     source_id: str = Field(..., min_length=1, description="文档来源标识，如文件名或编号")
     metadata: dict[str, str] = Field(default_factory=dict, description="附加元数据")
+    # 不接受客户端输入，摄入端点会用 JWT 中的 tenant_id 强制覆盖
+    tenant_id: str = Field(default="", description="租户ID，由服务端从 JWT 强制注入")
 
 
 class IngestResponse(BaseModel):
