@@ -7,18 +7,20 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.application.services.chat_service import ChatService
 from app.application.services.ingest_service import IngestService
@@ -55,6 +57,7 @@ from app.observability.prometheus_metrics import (
     REQUEST_LATENCY,
 )
 from app.rag.retrieval.retriever import Retriever
+from app.schemas.errors import AppError, ErrorCode, error_payload
 from app.schemas.ingest import IngestTextRequest
 
 
@@ -111,13 +114,10 @@ def create_app() -> FastAPI:
         except TimeoutError:
             return JSONResponse(
                 status_code=503,
-                content={
-                    "error": {
-                        "code": "SERVICE_OVERLOADED",
-                        "message": "服务当前繁忙，请稍后重试",
-                        "retryable": True,
-                    }
-                },
+                content=error_payload(
+                    ErrorCode.SERVICE_OVERLOADED,
+                    request_id=request.headers.get("X-Request-ID", ""),
+                ),
                 headers={"Retry-After": "1"},
             )
         try:
@@ -263,20 +263,83 @@ def create_app() -> FastAPI:
         limit = exc.limit.limit
         return JSONResponse(
             status_code=429,
-            content={
-                "error": {
-                    "code": "RATE_LIMIT_EXCEEDED",
-                    "message": "请求过于频繁，请稍后再试",
-                    "retryable": True,
-                }
-            },
+            content=error_payload(
+                ErrorCode.RATE_LIMIT_EXCEEDED,
+                request_id=_request_id(_request),
+            ),
             headers={
                 "Retry-After": str(limit.get_expiry()),
                 "X-RateLimit-Limit": str(limit.amount),
             },
         )
 
+    def _request_id(request: Request) -> str:
+        return getattr(request.state, "request_id", "")
+
+    def app_error_handler(request: Request, exc: Exception) -> Response:
+        err = cast(AppError, exc)
+        return JSONResponse(
+            status_code=err.status_code,
+            content=error_payload(
+                err.code,
+                err.message,
+                request_id=_request_id(request),
+                details=err.details,
+            ),
+            headers=err.headers,
+        )
+
+    def validation_error_handler(request: Request, exc: Exception) -> Response:
+        errors = cast(RequestValidationError, exc).errors()
+        fields = [{"field": ".".join(str(p) for p in e["loc"]), "reason": e["msg"]} for e in errors]
+        return JSONResponse(
+            status_code=422,
+            content=error_payload(
+                ErrorCode.VALIDATION_FAILED, request_id=_request_id(request), details=fields
+            ),
+        )
+
+    def unhandled_error_handler(request: Request, exc: Exception) -> Response:
+        logger.exception("Unhandled error: request_id=%s", _request_id(request))
+        return JSONResponse(
+            status_code=500,
+            content=error_payload(ErrorCode.INTERNAL_ERROR, request_id=_request_id(request)),
+        )
+
+    # 兼容存量 HTTPException：按状态码映射为错误码，新代码应直接抛 AppError
+    _status_to_code = {
+        400: ErrorCode.REQUEST_INVALID,
+        401: ErrorCode.AUTH_INVALID_TOKEN,
+        403: ErrorCode.AUTH_FORBIDDEN,
+        404: ErrorCode.RESOURCE_NOT_FOUND,
+        409: ErrorCode.REQUEST_CONFLICT,
+        413: ErrorCode.PAYLOAD_TOO_LARGE,
+        422: ErrorCode.VALIDATION_FAILED,
+        429: ErrorCode.RATE_LIMIT_EXCEEDED,
+        503: ErrorCode.SERVICE_UNAVAILABLE,
+    }
+
+    def http_exception_handler(request: Request, exc: Exception) -> Response:
+        http_exc = cast(StarletteHTTPException, exc)
+        code = _status_to_code.get(http_exc.status_code, ErrorCode.INTERNAL_ERROR)
+        detail = http_exc.detail
+        return JSONResponse(
+            status_code=http_exc.status_code,
+            content=error_payload(
+                code,
+                detail if isinstance(detail, str) else None,
+                request_id=_request_id(request),
+                details=detail if isinstance(detail, dict) else None,
+            ),
+            headers=http_exc.headers,
+        )
+
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+
+    app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.add_exception_handler(Exception, unhandled_error_handler)
 
     @app.on_event("startup")
     async def startup_checks() -> None:

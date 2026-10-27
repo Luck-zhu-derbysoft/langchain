@@ -11,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, Header, Request, UploadFile
 from pypdf import PdfReader
 from redis import asyncio as redis_asyncio
 
@@ -24,6 +24,7 @@ from app.infrastructure.security.auth import TokenPayload, require_auth
 from app.infrastructure.vectorstore.chroma_store import ChromaStore
 from app.main import limiter
 from app.observability.langsmith_tracer import LangSmithTracer
+from app.schemas.errors import AppError, ErrorCode
 from app.schemas.ingest import IngestResponse, IngestTextRequest
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
@@ -55,7 +56,7 @@ def _parse_upload_to_text(file_name: str, content_bytes: bytes) -> str:
         pages = [(page.extract_text() or "") for page in reader.pages]
         text = "\n".join(pages).strip()
         if not text:
-            raise HTTPException(status_code=400, detail="PDF 文件解析失败，未提取到文本内容。")
+            raise AppError(ErrorCode.REQUEST_IN_PROGRESS)
         return text
     # 其他纯文本格式直接解码
     elif suffix in _ALLOWED_TEXT_SUFFIXES:
@@ -64,7 +65,7 @@ def _parse_upload_to_text(file_name: str, content_bytes: bytes) -> str:
         except UnicodeDecodeError:
             return content_bytes.decode("gbk")
 
-    raise HTTPException(status_code=400, detail="不支持的文件类型，仅支持 txt/md/json/csv/log/pdf")
+    raise AppError(ErrorCode.REQUEST_INVALID, "不支持的文件类型，仅支持 txt/md/json/csv/log/pdf")
 
 
 def _build_redis_client() -> redis_asyncio.Redis | None:
@@ -110,8 +111,8 @@ async def ingest_text(
     """
     req.tenant_id = _auth.tenant_id
     if len(req.content.encode("utf-8")) > MAX_INGEST_TEXT_SIZE:
-        raise HTTPException(
-            status_code=413, detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit"
+        raise AppError(
+            ErrorCode.PAYLOAD_TOO_LARGE, f"内容超过 {MAX_INGEST_TEXT_SIZE / 1024 / 1024:.0f}MB 限制"
         )
     root_run = _trace.start_root(
         name="api.ingest_text",
@@ -123,7 +124,7 @@ async def ingest_text(
     acquired, cache = await _idempotency_guard.acquire(idempotency_key_value)
     if not acquired:
         if cache is None or cache == "Processing":
-            raise HTTPException(status_code=409, detail="重复请求正在处理中，请稍后重试")
+            raise AppError(ErrorCode.REQUEST_IN_PROGRESS)
         _trace.end_run(root_run, outputs={"deduplicated": True})
         return IngestResponse.model_validate_json(cache)
     try:
@@ -181,16 +182,16 @@ async def ingest_file(
     try:
         content_bytes = await file.read(MAX_INGEST_FILE_SIZE + 1)  # 读取文件内容，限制最大字节数
         if not content_bytes:
-            raise HTTPException(status_code=413, detail="上传文件内容为空")
+            raise AppError(ErrorCode.REQUEST_INVALID, "上传文件内容为空")
         # if len(content_bytes) > MAX_INGEST_FILE_SIZE:
         #     raise HTTPException(
         #         status_code=413, detail=f"File exceeds {MAX_INGEST_FILE_SIZE / 1024 / 1024}MB limit"
         #     )
         content_str = _parse_upload_to_text(file_name, content_bytes)
         if len(content_str.encode("utf-8")) > MAX_INGEST_TEXT_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Content exceeds {MAX_INGEST_TEXT_SIZE / 1024 / 1024}MB limit",
+            raise AppError(
+                ErrorCode.PAYLOAD_TOO_LARGE,
+                f"内容超过 {MAX_INGEST_TEXT_SIZE / 1024 / 1024:.0f}MB 限制",
             )
         resolved_source_id = source_id.strip() or Path(file_name).stem
         ingest_req = IngestTextRequest(
@@ -208,7 +209,7 @@ async def ingest_file(
         acquired, cache = await _idempotency_guard.acquire(idempotency_key_value)
         if not acquired:
             if cache is None or cache == "Processing":
-                raise HTTPException(status_code=409, detail="重复请求正在处理中，请稍后重试")
+                raise AppError(ErrorCode.REQUEST_IN_PROGRESS)
             _trace.end_run(root_run, outputs={"deduplicated": True})
             return IngestResponse.model_validate_json(cache)
 

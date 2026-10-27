@@ -16,6 +16,7 @@ from app.infrastructure.security.auth import TokenPayload, require_auth
 from app.main import limiter
 from app.observability.alert_types import AlertSeverity, AlertTypes
 from app.schemas.chat import ChatRequest, ClearRequest
+from app.schemas.errors import AppError, ErrorCode
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -220,12 +221,12 @@ async def submit_intervention(
             tenant_id=_auth.tenant_id,
             user_id=_auth.sub,
         )
-    except LookupError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    except LookupError:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "待处理任务不存在")
+    except ValueError:
+        raise AppError(ErrorCode.REQUEST_CONFLICT, "任务当前状态不允许该操作")
+    except RuntimeError:
+        raise AppError(ErrorCode.SERVICE_UNAVAILABLE)
 
 
 @router.get("/{request_id}/intervention-history")

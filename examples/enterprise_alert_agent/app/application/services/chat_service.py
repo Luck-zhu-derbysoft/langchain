@@ -71,6 +71,7 @@ from app.observability.langsmith_tracer import LangSmithTracer
 from app.observability.metrics import MetricsCollector
 from app.rag.retrieval.retriever import Retriever
 from app.schemas.chat import ChatRequest, ChatResponse, Citation
+from app.schemas.errors import ERROR_SPECS, ErrorCode
 from app.tool.static import _safe_parse_intent_json, _to_bool
 
 logger = logging.getLogger(__name__)
@@ -662,46 +663,34 @@ class ChatService:
             self.metrics_collector.record_error(request_id=request_id)
             logger.exception("[%s] BudgetExceededError failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(exc))
-            yield {
-                "type": "error",
-                "code": "429",
-                "message": "本次请求已超过模型 token 预算，请缩短问题或稍后重试",
-                "request_id": request_id,
-                "trace_id": trace_id,
-            }
+            yield self._error_frame(ErrorCode.MODEL_BUDGET_EXCEEDED, request_id, trace_id)
         except ModelAuthError as exc:
             self.metrics_collector.record_error(request_id=request_id)
             logger.exception("[%s] ModelAuthError failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(exc))
-            yield {
-                "type": "error",
-                "code": "401",
-                "message": "模型鉴权失败，请检查 DASHSCOPE_API_KEY 是否正确且可用。",
-                "request_id": request_id,
-                "trace_id": trace_id,
-            }
+            yield self._error_frame(ErrorCode.MODEL_AUTH_FAILED, request_id, trace_id)
         except ModelRequestError as exc:
             self.metrics_collector.record_error(request_id=request_id)
             logger.exception("[%s] Chat aask_stream ModelRequestError failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(exc))
-            yield {
-                "type": "error",
-                "code": "502",
-                "message": "模型服务请求失败，请稍后重试。",
-                "request_id": request_id,
-                "trace_id": trace_id,
-            }
+            yield self._error_frame(ErrorCode.MODEL_UPSTREAM_ERROR, request_id, trace_id)
         except Exception as exc:
             self.metrics_collector.record_error(request_id=request_id)
             logger.exception("[%s] Chat aask_stream Exception failed", request_id)
             self.trace.end_run(ask_run, error=LangSmithTracer.format_error(exc))
-            yield {
-                "type": "error",
-                "code": "500",
-                "message": str(exc),
-                "request_id": request_id,
-                "trace_id": trace_id,
-            }
+            yield self._error_frame(ErrorCode.INTERNAL_ERROR, request_id, trace_id)
+
+    @staticmethod
+    def _error_frame(code: ErrorCode, request_id: str, trace_id: str) -> dict[str, Any]:
+        spec = ERROR_SPECS[code]
+        return {
+            "type": "error",
+            "code": code.value,
+            "message": spec.message,
+            "retryable": spec.retryable,
+            "request_id": request_id,
+            "trace_id": trace_id,
+        }
 
     @staticmethod
     def tool_result_to_string(tool_result: dict[str, Any]) -> str:

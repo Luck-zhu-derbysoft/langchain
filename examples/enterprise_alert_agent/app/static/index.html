@@ -370,7 +370,7 @@
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok || !data.token) {
-                throw new Error(formatErrorDetail(data.detail || data || '获取认证 token 失败'));
+                throw new Error(formatApiError(data) || '获取认证 token 失败');
             }
             localStorage.setItem(AUTH_TOKEN_KEY, data.token);
             return data.token;
@@ -390,8 +390,11 @@
             headers.set('Authorization', `Bearer ${token}`);
             const res = await fetch(url, { ...options, headers });
             if (res.status === 401 && retry) {
-                localStorage.removeItem(AUTH_TOKEN_KEY);
-                return authenticatedFetch(url, options, false);
+                const body = await res.clone().json().catch(() => ({}));
+                if (body.error && body.error.code === 'AUTH_INVALID_TOKEN') {
+                    localStorage.removeItem(AUTH_TOKEN_KEY);
+                    return authenticatedFetch(url, options, false);
+                }
             }
             return res;
         }
@@ -433,6 +436,14 @@
             ['tenantIdInput', 'userIdInput', 'bizContextInput'].forEach((id) => {
                 document.getElementById(id).addEventListener('blur', persistChatScope);
             });
+        }
+
+        function formatApiError(data) {
+            const err = data && data.error;
+            if (!err) return formatErrorDetail(data && (data.detail || data));
+            const rid = err.request_id ? `（request_id: ${err.request_id}）` : '';
+            const hint = err.retryable ? '，可稍后重试' : '';
+            return `${err.message || '请求失败'}${hint}${rid}`;
         }
 
         function formatErrorDetail(detail) {
@@ -524,7 +535,7 @@
 
                 if (!res.ok || !res.body) {
                     const data = await res.json().catch(() => ({}));
-                    const errMsg = formatErrorDetail(data.detail || data || '请求失败');
+                    const errMsg = formatApiError(data);
                     botBubble.innerHTML = `<span style="color:#c62828">❌ 错误：${escapeHtml(errMsg)}</span>`;
                     return;
                 }
@@ -567,7 +578,9 @@
                             botBubble.innerHTML = `${escapeHtml(answerText || String(payload.answer || ''))}${citationsHtml}`;
                             chatBox.scrollTop = chatBox.scrollHeight;
                         } else if (payload.type === 'error') {
-                            botBubble.innerHTML = `<span style="color:#c62828">❌ 错误：${escapeHtml(payload.message || '请求失败')}</span>`;
+                            const rid = payload.request_id ? `（request_id: ${payload.request_id}）` : '';
+                            const hint = payload.retryable ? '，可稍后重试' : '';
+                            botBubble.innerHTML = `<span style="color:#c62828">❌ 错误：${escapeHtml((payload.message || '请求失败') + hint + rid)}</span>`;
                             chatBox.scrollTop = chatBox.scrollHeight;
                         }
                     }
@@ -603,7 +616,7 @@
                     localStorage.removeItem(CHAT_THREAD_KEY);
                     chatBox.innerHTML += `<div class="chat-msg bot">🧹 ${escapeHtml(data.message || '会话记忆已清空')}</div>`;
                 } else {
-                    chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 清理失败：${escapeHtml(formatErrorDetail(data.detail || data))}</div>`;
+                    chatBox.innerHTML += `<div class="chat-msg bot" style="color:#c62828">❌ 清理失败：${escapeHtml(formatApiError(data))}</div>`;
                 }
                 chatBox.scrollTop = chatBox.scrollHeight;
             } catch (e) {
@@ -656,7 +669,7 @@
                     document.getElementById('category').value = '';
                 } else {
                     resultBox.className = 'result-box error';
-                    resultBox.textContent = `❌ 错误：${JSON.stringify(data.detail || data)}`;
+                    resultBox.textContent = `❌ 错误：${formatApiError(data)}`;
                 }
             } catch (e) {
                 resultBox.className = 'result-box error';
@@ -706,7 +719,7 @@
                     document.getElementById('docContent').value = '';
                 } else {
                     resultBox.className = 'result-box error';
-                    resultBox.textContent = `❌ 错误：${JSON.stringify(data.detail || data)}`;
+                    resultBox.textContent = `❌ 错误：${formatApiError(data)}`;
                 }
             } catch (e) {
                 resultBox.className = 'result-box error';

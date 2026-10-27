@@ -7,11 +7,12 @@ from enum import Enum
 from typing import Annotated, Any, cast
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
 from app.config.settings import settings
+from app.schemas.errors import AppError, ErrorCode
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +79,8 @@ def get_current_user(token: str | None = Depends(oauth2_scheme)) -> TokenPayload
             exp=int(datetime.now(tz=UTC).timestamp()) + 3600,
             tenant_id="test-tenant",
         )
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid token",
-        headers={"WWW-Authenticate": "Bearer"},
+    credentials_exception = AppError(
+        ErrorCode.AUTH_INVALID_TOKEN, headers={"WWW-Authenticate": "Bearer"}
     )
     try:
         if token is None:
@@ -124,10 +123,7 @@ def require_roles(*roles: Role):
         token_data: Annotated[TokenPayload, Depends(get_current_user)],
     ) -> TokenPayload:
         if token_data.role not in roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions",
-            )
+            raise AppError(ErrorCode.AUTH_FORBIDDEN)
         return token_data
 
     return role_checker

@@ -16,6 +16,7 @@ from app.infrastructure.security.auth import (
     verify_principal,
 )
 from app.main import limiter
+from app.schemas.errors import AppError, ErrorCode
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -40,7 +41,7 @@ async def create_token(request: Request, token_request: TokenRequest):
             resource="/admin/token",
             detail={"reason": "invalid credentials"},
         )
-        raise HTTPException(status_code=401, detail="Invalid API key or tenant ID")
+        raise AppError(ErrorCode.AUTH_INVALID_CREDENTIALS)
     token = create_access_token(
         token_request.user_id,
         role,
@@ -97,7 +98,7 @@ async def update_config(
             resource=f"/admin/config/{key}",
             detail={"error": str(exc), "operator_user_id": user_id},
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise AppError(ErrorCode.INTERNAL_ERROR)
 
 
 @router.get("/config")
@@ -134,7 +135,7 @@ async def reset_config(
     try:
         success = _dynamic_settings.reset(key, user_id=user_id)
         if not success:
-            raise HTTPException(status_code=404, detail=f"Failed to reset config for key: {key}")
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, f"配置项不存在：{key}")
         audit_logger.log(
             action=AuditAction.CONFIG_CHANGE,
             user_id=current_user.sub,
@@ -148,6 +149,8 @@ async def reset_config(
             "key": key,
             "message": f"Config {key} reset to default",
         }
+    except AppError:
+        raise
     except Exception as exc:
         audit_logger.log(
             action=AuditAction.CONFIG_CHANGE,
@@ -157,7 +160,7 @@ async def reset_config(
             resource=f"/admin/config/{key}/reset",
             detail={"error": str(exc), "operator_user_id": user_id},
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise AppError(ErrorCode.INTERNAL_ERROR)
 
 
 @router.get("/config/history")
