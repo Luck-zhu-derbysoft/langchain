@@ -19,8 +19,8 @@ class TextSplitter:
         chunk_overlap: int | None = None,
         tracer: LangSmithTracer | None = None,
     ) -> None:
-        self._chunk_size = chunk_size or settings.chunk_size
-        self._chunk_overlap = chunk_overlap or settings.chunk_overlap
+        self._chunk_size = chunk_size if chunk_size is not None else settings.chunk_size
+        self._chunk_overlap = chunk_overlap if chunk_overlap is not None else settings.chunk_overlap
         self._tracer = tracer
 
     def split(self, text: str, *, parent_run: RunTree | None = None) -> list[str]:

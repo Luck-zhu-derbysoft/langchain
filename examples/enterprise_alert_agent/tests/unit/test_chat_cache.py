@@ -5,6 +5,7 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.application.services.chat_service import ChatService
+from app.infrastructure.agent.agent_registry import AgentRegistry
 from app.schemas.chat import ChatRequest
 
 
@@ -12,6 +13,7 @@ class TestChatCache(IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.service = object.__new__(ChatService)
         self.service.trace = Mock()
+        self.service.agent_registry = AgentRegistry()
         self.service.model_client = Mock()
         self.service.metrics_collector = Mock()
         self.service.metrics_collector.get_metrics.return_value = None

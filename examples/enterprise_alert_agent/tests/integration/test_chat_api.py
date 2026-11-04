@@ -1,12 +1,18 @@
 import json
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 
 client = TestClient(app)
+
+live = pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_TESTS"), reason="需要真实 LLM/向量库，设置 RUN_LIVE_TESTS=1 运行"
+)
 
 
 def _post_stream(payload: dict) -> tuple[int, list[dict]]:
@@ -34,6 +40,7 @@ def test_chat_validation() -> None:
     assert status_code == 422
 
 
+@live
 def test_retrieval_hit_after_ingest() -> None:
     source_id = "eval-doc-001"
     content = "值班告警升级策略：连续3次失败后必须升级到二线。"
@@ -52,6 +59,7 @@ def test_retrieval_hit_after_ingest() -> None:
     assert any(c["source_id"] == source_id for c in citations)
 
 
+@live
 def test_time_query_returns_today() -> None:
     tz = "Asia/Shanghai"
     today = datetime.now(ZoneInfo(tz))

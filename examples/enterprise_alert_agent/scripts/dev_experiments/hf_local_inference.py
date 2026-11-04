@@ -12,25 +12,24 @@ def generate_reply(
     model_name: str = DEFAULT_MODEL,
     generator: TextGenerator | None = None,
 ) -> str:
-    # """Generate a response using a local Hugging Face model."""
-    # if not prompt.strip():
-    #     raise ValueError("Prompt cannot be empty.")
-    # if generator is None:
-    #     from transformers import pipeline
+    """Generate a response using a local Hugging Face model."""
+    if not prompt.strip():
+        raise ValueError("Prompt cannot be empty.")
+    if generator is None:
+        from transformers import pipeline # type: ignore
 
-    #     generator = pipeline(
-    #         task="text-generation",
-    #         model=model_name,
-    #         device=-1,
-    #     )
-    # outputs = generator(
-    #     prompt,
-    #     max_new_tokens=128,
-    #     do_sample=False,
-    #     return_full_text=False,
-    # )  # type: ignore
-    # return str(outputs[0]["generated_text"]).strip()
-    return "这是本地模型回答"
+        generator = pipeline(
+            task="text-generation",
+            model=model_name,
+            device=-1,
+        )
+    outputs = generator(
+        prompt,
+        max_new_tokens=128,
+        do_sample=False,
+        return_full_text=False,
+    )  # type: ignore
+    return str(outputs[0]["generated_text"]).strip()
 
 
 def main() -> None:
