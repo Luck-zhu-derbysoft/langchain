@@ -1,181 +1,124 @@
-# enterprise_alert_agent 企业级评估与升级路线图
+# 企业告警 Agent 学习与升级指南（迭代一）
 
-> 文档版本：v1.0（2026-08-08）
-> 评估方式：全量代码审查（核心链路逐行阅读 + 全基础设施扫描 + 关键风险点二次验证）
-> 用途：作为系统从「原型」升级到「企业级生产可用」的整改依据
+> **目标：** 将原型补齐为安全、可靠、可测试的生产可用基础。
+> 本文合并了原评估与技能清单；“已修复”标签保留自修复过程中的手动标记。
 
----
+## 一、迭代目标
 
-## 目录
+- 补齐安全、并发、持久化、租户隔离和资源边界等生产底线。
+- 建立自动化测试与 CI，确保核心链路可回归。
+- 保留现有分层架构、追踪、多 Agent 编排和双级记忆等有效基础。
 
-## 一、总体结论
+## 二、技能清单
 
-**定位：这是一个架构清晰、方向正确的高质量「原型/Demo」，但离「企业级生产可用」还有明显差距。**
+优先级：🔴 优先补齐 ｜ 🟠 重要 ｜ 🟡 持续复盘 ｜ 🟢 拓展项
 
-- **做得好的地方**：分层架构规范（`api → application → infrastructure → observability`）、LangSmith 全链路追踪纪律、多 Agent 编排与注册表+熔断、故障诊断与告警、双级记忆（Redis+PG）、任务分解并行执行、PII 脱敏、JWT/RBAC 脚手架——这些组件确实存在且大多可运行。
-- **致命短板**：认证体系可被零成本绕过、生产密钥硬编码在代码里、存在真实的多线程/异步 Bug、审计与指标只存内存、测试近乎为零。
-  
-## 二、成熟度评分表
+### 1. 异步与并发
 
-| 维度 | 评分 | 一句话 |
-|---|---|---|
-| 架构分层与可读性 | 8.5 | 分层清晰，依赖注入规范，命名良好 |
-| 可观测性（追踪/指标/告警） | 7.5 | 追踪很扎实；指标/告警有真实 Bug 且仅内存 |
-| 多 Agent 编排与容错 | 6.5 | 概念完整（注册表/熔断/降级/DLQ），但多处未真正接线 |
-| 安全性 | **2.0** | 认证可绕过、密钥入库，当前不可对外暴露 |
-| 数据持久化与一致性 | 5.0 | PG 连接池是死代码；Redis 错误被静默吞掉 |
-| 可测试性 | **2.5** | 仅 1 个调用真实付费 API 的集成测试，零单元测试 |
-| 多租户隔离 | 3.0 | `tenant_id` 有默认值且无任何强制隔离 |
-| 资源管理与性能边界 | 4.0 | 指标无界增长、ingest 无大小限制、同步阻塞式 IO |
-| 审计与合规 | 3.5 | 审计记录大部分只在内存，文件日志逻辑是坏的 |
-| **综合** | **≈4.5** | 优秀原型，未达生产级 |
-
-**评分口径**：10 分为「可直接承载生产流量」；5 分以下代表存在阻断性缺陷。
-
----
-
-## 三、架构概览
-
-```mermaid
-flowchart TB
-    subgraph API层
-        CHAT["/chat/*<br/>stream / memory / intervention / alerts / metrics"]
-        ING["/ingest/*<br/>text / file / stats"]
-        ADM["/admin/*<br/>token / config"]
-        HEA["/health"]
-    end
-    subgraph 应用层
-        CS["ChatService<br/>意图分类→工具选择→RAG→ReAct循环→任务分解→并行执行"]
-        IS["IngestService"]
-    end
-    subgraph 基础设施层
-        ORC["MultiAgentOrchestrator + AgentRegistry(熔断)"]
-        MEM["MemoryStore<br/>Redis(快) + PostgreSQL(源)"]
-        VEC["ChromaStore + Retriever(融合重排)"]
-        LLM["ModelClient<br/>主模型+降级+重试"]
-        MCP["MCP Client"]
-        DLQ["DeadLetterQueue"]
-        INT["InterventionHandler(人机协同)"]
-        AUD["AuditLogger"]
-    end
-    subgraph 可观测层
-        TRC["LangSmithTracer"]
-        MET["MetricsCollector"]
-        ALM["AlertManager"]
-
-
-**技术栈**：Python 3.11+ / FastAPI / Pydantic v2 / OpenAI SDK（DashScope 兼容 `qwen-plus` / `qwen-turbo`）/ ChromaDB / Redis / PostgreSQL（psycopg3）/ LangSmith / slowapi / PyJWT / MCP SDK / 线程池多 Agent 编排。
-
-
-## 四、P0 级问题（上线前必须修复）
-
-### 4.1 认证体系可被完全绕过 (已修复)
-
-| 项 | 说明 |
-|---|---|
-| 位置 | `app/api/routers/admin.py:22`、`app/infrastructure/security/auth.py` |
-| 问题 | `POST /admin/token` **无需任何凭证**，请求体直接带 `{user_id, role}`，任何人都能给自己签发 `role: "admin"` 的 JWT |
-| 影响 | RBAC（`require_roles`）只挂在 `/admin/*`；`/chat/*`、`/ingest/*`、`/health` 全部**无认证**。当前 JWT/RBAC 是「摆设」 |
-| 修复方向 | ① token 端点需接入真实凭证（密码/API Key/OAuth）；② 聊天/摄入端点统一接入认证中间件；③ 权限按租户维度校验 |
-
-### 4.2 生产密钥硬编码在代码中 (已修复)
-
-| 项 | 说明 |
-|---|---|
-| 位置 | `app/config/settings.py:64,78,87,112` |
-| 问题 | 代码内直接写入 `mysql_password = "MyPass_2026_secure"`、`redis_password = "MyRedisPass123!"`、`pg_password = "postgres"`、`admin_jwt_secret = "CHANGE_ME_IN_ENV"`，以及明文公网 IP `139.224.246.172` |
-| 影响 | `admin_jwt_secret` 用默认值 + HS256 = **任何人可伪造管理员 JWT**；密码入库一旦提交即泄露 |
-| 修复方向 | ① 所有密钥默认值为空，强制从环境变量/Secrets Manager 读取，缺失即启动失败；② 项目根添加 `.gitignore`（`.env`、`data/chroma_db/`、`*.sqlite3`）；③ 添加 `.env.example` 模板；④ 轮换已泄露的密码与密钥 |
-
-> 附：`admin_jwt_exp_minutes` 在 settings 中已定义但从未使用，`create_access_token` 内写死 15 分钟。
-
-
-### 4.3 真实的多线程异步 Bug (已修复)
-
-| 项 | 说明 |
-|---|---|
-| 位置 | `app/observability/alert_manager.py:48`、`app/application/services/chat_service.py`（`_execute_decomposed_tasks`） |
-| 问题 | `AlertManager.create_alert()` 调用 `asyncio.create_task(...)`，但它在 `ThreadPoolExecutor` **工作线程**中被调用 → 必然抛 `RuntimeError: no running event loop` |
-| 影响 | 多任务故障路径下的告警**永远不会真正分发**（异常被外层故障处理吞掉）；邮件/短信/SMS 分发也全部是 `TODO` 占位 |
-| 修复方向 | ① 用「线程安全队列 + 独立分发线程」或 `run_coroutine_threadsafe` 替代 `asyncio.create_task`；② 接入真实通知渠道或先落库 |
-
----
-根据文档内容，修复五、P1 级问题3 | **限流** 。给出对比修改的代码，我手动修复
-## 五、P1 级问题（生产化关键缺口）
-
-| # | 领域 | 问题 | 位置 |
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
 |---|---|---|---|
-| 1 | **审计合规** | 审计记录基本只存内存（上限 1 万条），`audit.jsonl` 仅在内存溢出瞬间写一条；`CHAT_REQUEST/INTERVENTION/LOGIN` 动作定义了但从未上报；配置变更日志记录 `new_value`（可能含密钥） | `app/infrastructure/audit/audit_logger.py` |
-| 2 | **测试** | 仅 `tests/integration/test_chat_api.py` 一个文件，全部调用**真实付费 DashScope API**，且写污染真实 Chroma/Redis/PG，无清理；零单元测试；无 CI | `tests/` |
-| 3 (已修复)| **限流** | 仅 `/chat/stream` 有 10 次/分钟/IP 限流；`/ingest`（上传文件）、`/admin`、干预接口全部无限制；按 IP 而非按用户/租户 | `app/api/routers/chat.py:35` |
-| 4 | **多租户**(已修复) | `tenant_id/user_id/thread_id` 均有默认值 `"default-*"`；检索、记忆、缓存均无强制租户隔离参数 → 多租户边界纯属「建议性」 | `app/schemas/chat.py` |
-| 5 | **连接管理**(已修复) | PG `ConnectionPool` 是死代码：`_pg_conn` 每次操作新建连接后关闭；Redis 所有操作 `except Exception: pass` 静默失败 | `app/infrastructure/memory/redis_postgres_conversation_memory.py` |
-| 6 | **DLQ 只写不读**(已修复) | `dead_letter_queue.add()` 有调用，但 `retry()/list_pending()/stats()` 没有任何路由或后台 Worker 触发 → DLQ 实际是「只写」的黑洞 | `app/infrastructure/queue/dlq_handler.py` |
-| 7 | **人机协同未接线** (已修复)| 人工干预只有手动 API 可触达；`chat_service` 中 `manual_intervention_required` 恒为 `False`；`create_intervention_request()` 从未被调用；`execute_intervention()` 未真正接线回调；`finally` 块无条件把结果写成 `success=False` 覆盖真实结果 | `app/infrastructure/agent/intervention_handler.py` |
-| 8 | **动态配置部分失效** (已修复)| `ChatService.__init__` 从 `ConfigManager` 读取，但 `_run_agent_loop`/`_execute_decomposed_tasks` 内部直接读 `settings.*` → 管理端改了这些 key 不生效；`DynamicSettings` 无锁、无持久化、value 无校验；`/admin/config/{key}` 无 key 白名单 | `app/application/services/chat_service.py`、`app/config/dynamic_settings.py`、`app/api/routers/admin.py` |
-| 9 | **资源边界**(已修复) | `MetricsCollector` 无界增长（内存泄漏）、无锁（多线程写竞争）；`get_summary` 忽略 `request_id` 聚合所有数据；`/ingest` 对 `content` 与上传文件**无大小限制**（DoS 面）；`BudgetExceededError` 未被捕获 → 落入 500 | `app/observability/metrics.py`、`app/api/routers/ingest.py`、`app/infrastructure/llm/model_client.py` |
-| 10 | **线程安全**(已修复) | `AgentRegistry`、`Retriever` 缓存、`MetricsCollector`、`InterventionHandler`、`DynamicSettings` 在并行任务线程中被并发读写却无锁 | 多处 |
+| asyncio 与线程边界（已修复） | 已处理线程中调度协程的问题 | 复盘线程安全队列、事件循环及 `run_coroutine_threadsafe` 的适用边界 | 🟡 |
+| 线程安全与共享状态（已修复） | 指标、注册表等共享状态已处理并发访问 | 检查锁粒度、单写者模式和有界缓存 | 🟡 |
+| 异步驱动与连接池 | 数据库及缓存连接管理已有改进 | 梳理连接池生命周期，评估同步调用对吞吐的影响 | 🟡 |
 
-根据文档内容，修复五、P1 级问题10 | **线程安全 。给出对比修改的代码，我手动修复
+### 2. 数据库与消息队列
 
-## 六、P2 级问题（打磨完善项）
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
+|---|---|---|---|
+| SQLModel ORM（已修复） | 数据访问层已完成对应整改 | 复盘模型、事务边界与迁移策略 | 🟡 |
+| PostgreSQL/Redis 连接池与索引（已修复） | 连接复用及相关问题已处理 | 验证连接池预热、超时、关闭和索引效果 | 🟡 |
+| 消息队列与死信队列（已修复） | DLQ 相关问题已处理 | 复盘 Redis Stream、Celery、Kafka、RabbitMQ 的选型与消费语义 | 🟡 |
+| 幂等与热点数据（已修复） | 幂等相关问题已处理 | 检查重复请求、重试和并发写入场景 | 🟡 |
 
-- **(已修复)Rerank 是「假」的**：`flashrank` 依赖与 `rerank_model="ms-marco-MiniLM-L-12-v2"` 已声明但从未使用；所谓 hybrid 只是「稠密余弦 + 词法重叠」加权融合，非真正的 BM25 混合检索/交叉编码器重排。位置：`app/rag/retrieval/retriever.py`。
-- **(已修复)A2A 是空壳**：`A2AProtocol` 只是 set/get 存根，无真实线协议；`from sqlalchemy import Enum` 遮蔽内置 `Enum`。位置：`app/infrastructure/agent/a2a_protocol.py`。
-- **(已修复)死代码/未用依赖**：`passlib[bcrypt]`（无密码哈希使用）、`alert_rules` 从未填充、`admin_jwt_exp_minutes` 未用、`data/` 下 `mock_checkpoint.py`/`mock_memoryStore.py`/`langsmith_demo.py` 不属于应用。
-- **(已修复)同步阻塞**：`time.sleep(backoff)` 在重试路径阻塞线程；psycopg/redis 均为同步驱动。
+### 3. Agent 核心能力
 
-- **(已修复)告警模型**：`Alert.acknowledged_at` 默认 `datetime.utcnow()`（语义上应为 `None`）；`alert_manager.py` 存在重复导入 `from sqlalchemy import true`。
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
+|---|---|---|---|
+| Skills 技能注册与注入（已修复） | 技能由注册机制管理 | 验证新增技能无需改动主流程 | 🟡 |
+| 工具调用与 MCP（已修复） | MCP 会话与工具调用问题已处理 | 复盘会话复用、超时、资源释放及工具白名单 | 🟡 |
+| 多模型接入与路由（已修复） | 已有统一路由与主备降级能力 | 用故障注入验证切换、熔断和恢复 | 🟡 |
+| LangGraph 编排（已修复） | 核心编排链路已完成对应整改 | 复盘 StateGraph、状态边界与可恢复性 | 🟡 |
+| 多智能体与反思（已修复） | Reviewer → Reviser 有界闭环已实现 | 复核证据约束、评分阈值和终止条件 | 🟡 |
+| 上下文工程与 Token 优化（已修复） | 上下文预算相关问题已处理 | 记录上下文预算、截断和成本变化 | 🟡 |
+| 任务状态管理与状态机（已修复） | 已实现状态持久化、启动清理与 HITL 恢复 | 验证异常退出后的恢复和状态迁移 | 🟡 |
+| Agent 评估（LLM-as-judge）（已修复） | 已有 Golden Set、Judge 评分和 CI 门禁 | 持续增加样本并复核评分波动；评估回答、工具选择及引用来源 | 🟡 |
 
+### 4. RAG 与模型能力
 
-## 七、系统优点（应保留的资产）✅
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
+|---|---|---|---|
+| 混合检索与重排 | 已有向量候选、BM25 融合与 FlashRank 重排 | 复核召回、排序和延迟之间的取舍 | 🟡 |
+| 向量数据库 | 已使用 Chroma | 使用同一数据集对比 Qdrant 或 Milvus | 🟡 |
+| RAG 评估（已修复） | 独立检索 Golden Set、Hit@K/Recall@K/MRR/nDCG 与 CI 阈值门禁已建立 | 扩充困难样本并监控指标波动 | 🟡 |
+| Hugging Face 本地推理（已修复） | 已有 Transformers + Qwen 本地推理示例及无模型下载单测 | 对接统一模型路由并记录延迟、内存 | 🟡 |
+| Fine-tuning（LoRA/SFT） | 尚未实现 | 准备告警领域数据集，使用 PEFT/TRL 训练并评估 | 🟢 |
+| 依赖注入与资源生命周期（已确认） | `create_app()` 管理应用级共享资源，`Depends(_get_chat_service)` 组装请求级服务 | 可选：类型化依赖容器与 FastAPI `lifespan` | 🟡 |
 
-1. **架构纪律优秀**：`api → application → infrastructure → observability → rag → schemas` 分层干净，依赖通过 `app.state.shared_dependencies` 注入，命名与注释质量高。
-2. **追踪很扎实**：`LangSmithTracer` 显式管理 `RunTree` 生命周期，服务/检索/LLM/工具各层都有父子 run，错误统一 `format_error` 收口。
-3. **多 Agent 概念完整**：注册表 + 能力匹配 + 优先级 + 熔断（连续失败 3 次断开、30s 自动恢复）+ 子任务按 Agent 分配。
-4. **任务编排有真实逻辑**：意图分类 → 工具选择 → 依赖感知的批处理并行执行（含依赖环检测）、失败子任务隔离、备选工具链降级。
-5. **记忆双级设计合理**：Redis 快路径 + PG 事实源，`SELECT ... FOR UPDATE` 保证 turn 计数串行化，PII 正则脱敏（手机/身份证/邮箱）。
-6. **初始化 SQL 规范**：`scripts/init_pg_memory_schema.sql` 幂等、有部分索引，与代码 SQL 一致。
-7. **容错思维到位**：模型双模型降级 + 重试、工具失败阈值降级为纯 RAG、故障诊断分严重级映射告警。
+### 5. 弹性与高并发
 
-## 九、升级路线图（分阶段执行清单）
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
+|---|---|---|---|
+| 熔断、背压与优雅停机 | 已具备相关能力 | 通过并发压测和依赖故障复盘状态机 | 🟡 |
+| 限流与降级（已修复） | 已有分层配额、共享计数/内存降级、过载 503、模型主备与熔断 | 按租户压测并调整容量参数 | 🟡 |
+| 弱网、超时与重试（已修复） | LLM/MCP/Webhook 有超时、有限重试和错误分类；Webhook 支持按告警 ID 幂等重放并有相关单测 | 做网络故障注入并监控重试指标 | 🟡 |
 
-### 阶段 0：安全止血（P0，1 周内）8.11-8.11
-- [ ] **4.1** `/admin/token` 接入真实凭证（密码哈希 + 校验；或改用 API Key）
-- [ ] **4.1** 聊天/摄入/健康接口统一接入认证（可选：内网白名单 + TrustedHost）
-- [ ] **4.2** `settings.py` 全部密钥默认值清空，强制环境变量读取，缺失即启动失败
-- [ ] **4.2** 项目根添加 `.gitignore`（`.env`、`data/chroma_db/`、`*.sqlite3`、`__pycache__/`、`.venv/`）
-- [ ] **4.2** 添加 `.env.example`；轮换已泄露的 DB/Redis/JWT 密钥
-- [ ] **4.3** 修复 `AlertManager` 线程分发 Bug（线程安全队列 / `run_coroutine_threadsafe`）
+### 6. 可观测与排障
 
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
+|---|---|---|---|
+| 日志、指标与追踪 | 已有可观测性基础 | 补齐关键埋点、延迟直方图及 `trace_id` 关联 | 🟠 |
+| 告警通道 | 已有 Webhook 通道 | 增加钉钉、企业微信或 PagerDuty 适配器 | 🟠 |
+| 故障排查 | 仍需加强容器、端口、内存和网络排查 | 模拟 OOM、连接池耗尽并形成定位记录 | 🔴 |
 
-### 阶段 1：生产能力（P1，2~3 周）8.12-8.15
+### 7. 安全与合规
 
-- [ ] **P1-1** 审计落盘：`audit.jsonl` 改为真正的 append-only 追加写；全动作埋点（chat/intervention/login/permission）；detail 脱敏
-- [ ] **P1-2** 测试：补单元测试（mock 模型/DB）；集成测试接入 Testcontainers/本地模拟；配置 CI（GitHub Actions）
-- [ ] **P1-3** 限流：覆盖全部端点；按租户/用户维度限流；ingest 增加大小/频率限制
-- [ ] **P1-4** 多租户：`tenant_id/user_id` 改为必填或从 token 解析；检索 `where`、记忆 scope、缓存 key 强制带租户
-- [ ] **P1-5** 连接管理：启用真实 PG 连接池；Redis 失败改为告警而非静默
-- [ ] **P1-6** DLQ：接入后台重试 Worker（含指数退避）与重试 API；Redis key 加 TTL
-- [ ] **P1-7** 人机协同：把 `create_intervention_request()` 接入 Agent 循环（工具失败/高严重度时触发）；修复 `finally` 覆盖真实结果的问题；修复 `execute_intervention()` 回调
-- [ ] **P1-8** 动态配置：`_run_agent_loop`/`_execute_decomposed_tasks` 改为统一读 `ConfigManager`；`DynamicSettings` 加锁 + 持久化 + 值校验 + key 白名单
-- [ ] **P1-9** 资源边界：`MetricsCollector` 加锁 + 有界淘汰；`get_summary` 按 request_id 过滤；捕获 `BudgetExceededError` 返回 429/400
-- [ ] **P1-10** 线程安全：为共享状态统一加锁（或改为线程隔离/单写者）
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
+|---|---|---|---|
+| 认证授权（JWT/RBAC）（已修复） | 已完成对应安全整改 | 回归验证凭证签发、鉴权和角色边界 | 🟡 |
+| 密钥托管与轮换（已修复） | 已完成对应安全整改 | 检查部署环境中的密钥轮换流程 | 🟡 |
+| 审计日志（append-only）（已修复） | 已完成对应安全整改 | 验证审计完整性、敏感字段脱敏和保留策略 | 🟡 |
+| 多租户隔离（已修复） | 已完成租户隔离相关整改 | 回归检索、记忆、缓存和接口间的租户边界 | 🟡 |
+| 端云契约与错误码（已修复） | 已完成对应整改 | 检查错误响应的一致性及兼容性 | 🟡 |
 
-### 阶段 2：能力增强（P2，3~6 周）8.16-8.20
+### 8. 工程化与架构
 
-- [ ] 启用真实 rerank（flashrank / cross-encoder），hybrid 检索改为 BM25 + 稠密
-- [ ] MCP：复用持久会话、加超时、客户端工具 allowlist、修复日志格式 Bug
-- [ ] LLM：流式重试/降级、指数退避、LLM 层熔断
-- [ ] 清理死代码：A2A 存根（或实现真实协议）、`passlib`、未用配置、`data/` 演示脚本归档
-- [ ] 告警模型修正（`acknowledged_at` 默认 None）；接入真实通知渠道
-- [ ] 多 Agent 真实化：为 `rag_agent`/`sql_agent` 等接入真实子 Agent 与专用工具集
-- [ ] 异步化：Redis/psycopg 换异步驱动；`time.sleep` 退避改异步等待
+| 技能点 | 项目现状 | 落地练习 | 优先级 |
+|---|---|---|---|
+| 单元与集成测试（已修复） | 核心模块有单测及无外部依赖的 API 集成测试；live 用例由 `RUN_LIVE_TESTS=1` 隔离 | 补充 retriever/chat_service 覆盖并接入 CI 阈值 | 🟡 |
+| CI/CD | GitHub Actions 已覆盖 lint、mypy、测试、覆盖率门禁、Docker 构建/扫描和 GHCR 推送 | 持续提高覆盖率并验证部署环境 | 🟡 |
+| Docker 与 Kubernetes | 配置已齐全 | 复盘探针、HPA 与资源限制 | 🟡 |
+| 分层架构与依赖方向 | 已完成分层 | 检查业务代码是否绕过配置和依赖注入边界 | 🟡 |
+| 微服务与分布式 | 当前为单体 | 先形成拆分边界与数据一致性设计，不急于拆服务 | 🟠 |
+| 云平台 | 尚未上云 | 准备目标云的部署、网络和运维清单 | 🟠 |
+| AI 编程工具 | 已在使用 | 沉淀可复用的 AI 研发 SOP | 🟠 |
 
-### 阶段 3：生产加固（长期）
+## 三、建议学习顺序
 
-- [ ] 可观测：接入 Prometheus 指标导出 + Grafana 面板；结构化日志（JSON）
-- [ ] 弹性：限流降级、全局熔断、优雅停机、健康检查增强（依赖探活）
-- [ ] 安全：密钥托管（Vault/KMS）、敏感信息扫描（gitleaks/trivy）、依赖漏洞扫描
-- [ ] 部署：容器化（Dockerfile）+ K8s/Compose + 配置中心
-- [ ] 压测与容量规划：QPS/延迟/P99 指标基线、成本预算
+| 阶段 | 重点 | 交付物 |
+|---|---|---|
+| 1–2 周 | 异步/并发、测试、数据访问 | 核心链路回归测试；讲清线程与事件循环边界 |
+| 3–4 周 | 安全、租户隔离与契约 | 鉴权、密钥、审计和租户边界回归结果 |
+| 5–6 周 | 可观测与排障 | 关键指标、追踪关联和一次故障定位记录 |
+| 7–8 周 | 队列、幂等与弹性 | DLQ/重试验证、幂等测试及故障注入结果 |
+| 9–12 周 | 多模型、CI/CD 与部署 | 主备切换验证、CI 全绿和部署检查清单 |
+| 13–18 周 | Agent/RAG 评估与架构拓展 | Golden Set 评估结果；微服务或 GraphRAG 方案 |
+
+## 四、优先复盘的六项能力
+
+1. **asyncio 与并发**：协程不可跨线程直接调度；共享状态需同步保护。
+2. **数据库与连接管理**：事务、连接池、索引和资源关闭均可验证。
+3. **队列与幂等**：生产可靠、消费幂等、失败可进入 DLQ 并可追踪。
+4. **Skills 注册体系**：注册表驱动，新技能不耦合主流程。
+5. **多模型路由**：统一协议，主备切换和熔断行为可回归。
+6. **安全与租户隔离**：凭证、数据、缓存及配额均按租户边界强制校验。
+
+## 五、速记
+
+- 异步：线程间安全提交协程；不要在无事件循环的线程里调用 `asyncio.create_task`。
+- 并发：共享状态同步保护，指标及缓存必须有界。
+- 可观测：`trace_id` 贯穿日志、指标与追踪。
+- 排障：日志 → 指标（尤其 P99）→ 追踪 → 可复现故障。
+- 消息队列：可靠生产、幂等消费、失败可重试并进入 DLQ。
+- Agent 评估：Golden Set 驱动端到端回归，LLM-as-judge 评价回答、工具选择和引用。
+- RAG 评估：以 Hit@K、Recall@K、MRR、nDCG 衡量检索，并使用固定 CI 阈值。
+- 安全：凭证签发受控、密钥可轮换、审计可追溯、租户强隔离。
