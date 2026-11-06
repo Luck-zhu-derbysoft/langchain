@@ -67,9 +67,17 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: uv run mypy app
 
-      - name: Offline smoke tests
+      - name: Test with coverage
         working-directory: ${{ env.WORKDIR }}
-        run: uv run pytest -q tests/integration -k "health or validation"
+        run: uv run pytest -q --cov=app --cov-report=xml --cov-fail-under=55
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: enterprise-alert-agent-coverage-${{ github.run_id }}
+          path: ${{ env.WORKDIR }}/coverage.xml
+          if-no-files-found: ignore
 
   container:
     name: Build and scan container
